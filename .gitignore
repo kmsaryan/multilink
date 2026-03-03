@@ -1,0 +1,30 @@
+.venv/
+venv/
+env/
+
+__pycache__/
+*.py[cod]
+*.so
+
+# Local databases and sqlite artifacts
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Runtime/output artifacts
+#modeling_reports/
+#payloads/
+#received/
+#Receiver/received/
+#Receiver/results/
+
+# OS/editor artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Logs/temp
+*.log
+*.tmp
+
