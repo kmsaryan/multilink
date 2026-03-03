@@ -1,8 +1,8 @@
 import sqlite3
 import os
 import time
-
-DB_PATH = "/usr/local/bin/multilink/receiver_state.db"
+import config   
+DB_PATH = config.DB_PATH
 
 def init_receiver_db():
     """Initializes the receiver database schema."""

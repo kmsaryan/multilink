@@ -11,12 +11,9 @@ from db_utils import register_metadata, register_arrival, init_receiver_db, DB_P
 
 
 def run_receiver():
-    # Ensure the directory for the DB exists
     db_dir = os.path.dirname(DB_PATH)
     if db_dir and not os.path.exists(db_dir):
         os.makedirs(db_dir, exist_ok=True)
-
-    # Initialize the database schema (creates tables if they don't exist)
     init_receiver_db()
 
     # 1. Setup Sockets for all interfaces
@@ -26,7 +23,7 @@ def run_receiver():
     for port in listen_ports:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # Good practice for restarts
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  
             s.bind(("0.0.0.0", port))
             s.setblocking(False)
             sockets.append(s)
@@ -59,7 +56,7 @@ def run_receiver():
                     total_chunks = struct.unpack("!I", pkt[17:21])[0]
                     filename = pkt[21:].decode('utf-8')
                     register_metadata(pid_str, filename, total_chunks)
-                    print(f"📄 Metadata Received: {filename} ({total_chunks} chunks)")
+                    print(f" Metadata Received: {filename} ({total_chunks} chunks)")
                     continue
 
                 # --- Handle Data (0) or Retransmissions (3) ---
@@ -106,7 +103,7 @@ def run_receiver():
 
                                 if os.path.exists(bin_path):
                                     os.rename(bin_path, final_path)
-                                    print(f"🎉 SUCCESS: {original_name} reassembled.")
+                                    print(f"SUCCESS: {original_name} reassembled.")
 
                                     cur.execute("UPDATE file_map SET status='completed' WHERE payload_id=?", (pid_str,))
                                     conn.commit()
@@ -120,7 +117,6 @@ def run_receiver():
 
             except Exception as e:
                 print(f"Error processing packet: {e}")
-
 
 if __name__ == "__main__":
     try:

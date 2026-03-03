@@ -1,0 +1,13 @@
+# Runtime SQLite state
+receiver_state.db
+
+# Generated outputs
+results/
+received/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local virtual environment
+.venv/

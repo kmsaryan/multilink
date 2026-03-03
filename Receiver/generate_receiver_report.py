@@ -3,9 +3,10 @@ import sqlite3
 import pandas as pd
 import os
 import matplotlib.pyplot as plt
+import config
 
-DB_PATH = "/usr/local/bin/multilink/receiver_state.db"
-RESULTS_DIR = "/usr/local/bin/multilink/results"
+DB_PATH = config.DB_PATH
+RESULTS_DIR = config.RESULTS_DIR
 
 def generate_report():
     if not os.path.exists(DB_PATH):
