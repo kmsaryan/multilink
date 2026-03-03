@@ -13,11 +13,11 @@ __pycache__/
 *.db-shm
 
 # Runtime/output artifacts
-#modeling_reports/
-#payloads/
-#received/
-#Receiver/received/
-#Receiver/results/
+modeling_reports/
+payloads/
+received/
+Receiver/received/
+Receiver/results/
 
 # OS/editor artifacts
 .DS_Store
