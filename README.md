@@ -1,9 +1,8 @@
 ## Project Structure
 
 This repository contains both the Sender (VM1) and Receiver (VM2) pipelines.
-
-├── docs/                  # Presentations and thesis draft
-├── Receiver/              # VM2 Cloud endpoint scripts and setup
+```
+├── Receiver/              # VM2 Cloud endpoint scripts and 
 │   ├── receiver.py        # Listens for UDP chunks
 │   └── generate_receiver_report.py
 ├── orchestrator.py        # VM1: Brains of the routing logic
@@ -11,7 +10,7 @@ This repository contains both the Sender (VM1) and Receiver (VM2) pipelines.
 ├── health_checker.py      # VM1: Probes interfaces for latency/loss
 ├── sender_worker.py       # VM1: Transmits data over designated interface
 └── manager.py             # VM1: Ingests payloads into the database
-
+```
 ## Project Contents
 
 - `health_checker.py`: probes each interface and stores RTT/throughput/jitter/loss.
@@ -47,7 +46,7 @@ python -m pip install -r requirements.txt
 
 ## Typical Run Order (VM1)
 
-1. Start health workers:
+1. Ensure receiver side receiver is running before starting  health workers:
 
 ```bash
 ./run_health.sh
