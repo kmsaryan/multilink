@@ -1,0 +1,73 @@
+import sqlite3
+import os
+import time
+
+DB_PATH = "/usr/local/bin/multilink/receiver_state.db"
+
+def init_receiver_db():
+    """Initializes the receiver database schema."""
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    # Table to map UUIDs to real filenames
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS file_map (
+            payload_id TEXT PRIMARY KEY,
+            filename TEXT,
+            total_chunks INT,
+            received_chunks INT DEFAULT 0,
+            status TEXT DEFAULT 'receiving'
+        )
+    """)
+    # Table to log every packet arrival for plotting
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS arrival_logs (
+            payload_id TEXT,
+            chunk_idx INT,
+            arrival_time REAL,
+            source_ip TEXT,
+            size INT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def register_metadata(pid, filename, total_chunks):
+    """
+    Saves the original filename and total chunks for a payload.
+    This is triggered by Type 4 packets.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT OR REPLACE INTO file_map (payload_id, filename, total_chunks) 
+            VALUES (?, ?, ?)
+        """, (pid, filename, total_chunks))
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"DB Error in register_metadata: {e}")
+    finally:
+        conn.close()
+
+def register_arrival(pid, idx, ip, size):
+    """Logs the arrival of a specific data chunk."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    try:
+        # Log the timestamped arrival
+        cur.execute("INSERT INTO arrival_logs VALUES (?, ?, ?, ?, ?)", 
+                    (pid, idx, time.time(), ip, size))
+        
+        # Increment the count of received chunks for this file
+        cur.execute("""
+            UPDATE file_map 
+            SET received_chunks = received_chunks + 1 
+            WHERE payload_id = ?
+        """, (pid,))
+        
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"DB Error in register_arrival: {e}")
+    finally:
+        conn.close()
