@@ -20,20 +20,21 @@ def register_payload(filepath):
     fname = os.path.basename(filepath)
     size = os.path.getsize(filepath)
     total_chunks = (size + CHUNK_SIZE - 1) // CHUNK_SIZE
+    
+    # Generate Payload UUID
     payload_id = str(uuid.uuid4())
 
     print(f"📦 Processing {fname} ({size} bytes)...")
 
-    # Copy the original file to our payload storage area
+    # Supervisor Question: Why an intermediary file?
+    # Answer: Fault Tolerance. If the system loses power during transmission, 
+    # the original data is preserved locally and mapped to the UUID.
     new_filename = os.path.join(PAYLOAD_DIR, f"{payload_id}.bin")
     shutil.copy2(filepath, new_filename)
 
-    # Initialize DB (if not exists)
     init_sender_db(DB_PATH)
 
-    # We will collect all chunks and insert them in ONE BATCH
     chunk_list = []
-    
     start_time = time.perf_counter()
 
     with open(filepath, "rb") as f:
@@ -52,7 +53,7 @@ def register_payload(filepath):
                 chunk_hash
             ))
 
-    # Single Database Transaction
+    # Single Database Transaction (ACID Compliance)
     conn = get_conn(DB_PATH)
     cur = conn.cursor()
     try:
@@ -83,13 +84,15 @@ def register_payload(filepath):
 
 def monitor_folder(folder_path):
     """Continuously monitor folder for new files"""
-    print(f"👀 Monitoring {folder_path} for .bin or .raw files...")
+    print(f"👀 Monitoring {folder_path} for new files...")
     processed_files = set()
+    
     while True:
         try:
-            # Look for any files that aren't the ones we renamed to UUIDs
-            files = [f for f in os.listdir(folder_path) 
-                    if not f.startswith('998c') and not len(f) > 30] # Skip UUID-named files
+            # Look for new files. 
+            # We explicitly ignore '.bin' files because those are our fault-tolerance backups.
+            files = [f for f in os.listdir(folder_path) if not f.endswith('.bin')]
+            
             for file in files:
                 filepath = os.path.join(folder_path, file)
                 if file not in processed_files:

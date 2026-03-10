@@ -4,9 +4,9 @@ import numpy as np
 def get_conn(db_path):
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=30) # Increase timeout to 30s
-    # Enable WAL mode for every connection to be safe
+    # Enable WAL mode for every connection to prevent locking issues
     conn.execute("PRAGMA journal_mode=WAL;")
-    # Ensure foreign keys are on if you use them
+    # Ensure foreign keys are on
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
     
@@ -42,6 +42,7 @@ def init_sender_db(db_path):
             PRIMARY KEY (payload_id, idx)
         )
     """)
+    # --- ADDED: instant_bitrate ---
     cur.execute("""
         CREATE TABLE IF NOT EXISTS interface_stats (
             interface_ip TEXT PRIMARY KEY,
@@ -50,9 +51,11 @@ def init_sender_db(db_path):
             last_check REAL,
             performance_score REAL DEFAULT 1.0,
             jitter REAL DEFAULT 0.0,
-            loss_rate REAL DEFAULT 0.0
+            loss_rate REAL DEFAULT 0.0,
+            instant_bitrate REAL DEFAULT 0.0 
         )
     """)
+    # --- ADDED: instant_bitrate ---
     cur.execute("""
         CREATE TABLE IF NOT EXISTS interface_metrics_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,7 +64,8 @@ def init_sender_db(db_path):
             uplink_rtt REAL,
             throughput REAL,
             jitter REAL,
-            loss_rate REAL
+            loss_rate REAL,
+            instant_bitrate REAL
         )
     """)
     conn.commit()
@@ -72,36 +76,32 @@ def mark_acked(db_path, payload_id, idx):
     conn = get_conn(db_path)
     cur = conn.cursor()
     cur.execute("UPDATE chunks SET state='acked' WHERE payload_id=? AND idx=?", (payload_id, idx))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
-def update_interface_health(db_path, interface_ip, rtt, throughput, jitter, loss_rate):
+def update_interface_health(db_path, interface_ip, rtt, throughput, jitter, loss_rate, instant_bitrate=0.0):
     """
     Update interface health metrics in the database.
-
-    Args:
-        db_path (str): Path to the SQLite database.
-        interface_ip (str): IP address of the interface.
-        rtt (float): Round-trip time in milliseconds.
-        throughput (float): Throughput in Mbps.
-        jitter (float): Jitter in milliseconds.
-        loss_rate (float): Packet loss rate (0.0 to 1.0).
     """
     conn = get_conn(db_path)
     cur = conn.cursor()
+    perf_score = instant_bitrate / (rtt + 0.001)
+
     cur.execute(
         """
         INSERT OR REPLACE INTO interface_stats (
-            interface_ip, success_rate, avg_rtt, last_check, performance_score, jitter, loss_rate
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            interface_ip, success_rate, avg_rtt, last_check, performance_score, jitter, loss_rate, instant_bitrate
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             interface_ip,
-            throughput,
+            throughput,       # This is now raw bits per second (bps)
             rtt,
             time.time(),
-            throughput / (rtt + 0.001),
+            perf_score,
             jitter,
             loss_rate,
+            instant_bitrate   # The new metric
         ),
     )
     conn.commit()

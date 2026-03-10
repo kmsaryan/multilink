@@ -1,9 +1,7 @@
 CHUNK_SIZE = 1200  # Adjusted to fit within 1500-byte MTU, accounting for headers
 DB_PATH = "/usr/local/bin/multilink/sender_coord.db"  # VM1 coordination database
 RECEIVER_IP = "90.27.22.100"
-RECEIVER_PORT = 9000
-WIFI_PORT = 5001      # Interface-specific ports
-FIVEG_PORT = 5002
-SATELLITE_PORT = 5003
+DATA_PORT = 9000
+HEALTH_PORT = 9001
 PAYLOAD_DIR = "/usr/local/bin/multilink/payloads"
 RECEIVED_DIR = "/usr/local/bin/multilink/received"

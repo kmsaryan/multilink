@@ -11,7 +11,7 @@ __pycache__/
 *.db-journal
 *.db-wal
 *.db-shm
-
+sender_coord.db
 # Runtime/output artifacts
 modeling_reports/
 payloads/
