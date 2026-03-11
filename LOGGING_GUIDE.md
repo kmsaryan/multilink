@@ -1,7 +1,11 @@
 # Multilink Logging & Documentation Guide
 
 ## Overview
-All Python scripts now include comprehensive structured logging to capture network fluctuations, link failures, and system behavior for documentation and debugging.
+All Python scripts use a **dual-output logging architecture**:
+- **FileHandler**: Writes directly to disk in `logs/` directory (primary, no duplicates)
+- **StreamHandler**: Prints to console at INFO+ level (for debugging/monitoring)
+
+Bash scripts launch workers in the background and **discard console output** (`/dev/null`) to prevent duplicate logging, since FileHandler is already writing to disk.
 
 ## Log File Locations
 All logs are stored in the `logs/` directory:
@@ -47,6 +51,42 @@ python3 orchestrator.py >> logs/orchestrator.log 2>&1 &
 ```
 
 The `2>&1` redirects **stderr to stdout**, so errors are captured in logs.
+
+## Understanding Log Levels
+
+| Level | Color | Usage | Example |
+|-------|-------|-------|---------|
+| `DEBUG` | Grey | Normal operation | RTT measurements, predictions |
+| `INFO` | Blue | Important milestones | Worker started, ACK counts |
+| `WARNING` | Yellow | Network issues | High latency (>500ms), high loss (>10%) |
+| `ERROR` | Red | Failures | Database errors, socket failures |
+| `CRITICAL` | Red+Bold | Severe issues | Link DOWN (10+ consecutive timeouts) |
+
+## The Dual-Logging Architecture (Why It Works)
+
+### Before (The Problem):
+```bash
+python3 health_checker.py 10.0.2.1 >> logs/health_checker_10_0_2_1.log 2>&1 &
+```
+- Python **FileHandler** writes directly to `logs/health_checker_10_0_2_1.log`
+- Python **StreamHandler** prints to stdout (console output)
+- Bash captures that stdout and appends to **the same file** with `>>`
+- **Result**: Two processes writing simultaneously = duplicate entries, corrupted logs, file locks
+
+### After (The Solution):
+```bash
+python3 health_checker.py 10.0.2.1 > /dev/null 2>&1 &
+```
+- Python **FileHandler** writes directly to `logs/health_checker_10_0_2_1.log` ✅
+- Python **StreamHandler** output goes to `/dev/null` (discarded) ✅
+- **Result**: Clean, single-writer logs with no duplicates ✅
+
+### When to Use Each Approach:
+| Scenario | Command | Why |
+|----------|---------|-----|
+| **Run in background** (production) | `python3 script.py > /dev/null 2>&1 &` | FileHandler writes safely, no console spam |
+| **Run interactively** (debugging) | `python3 script.py` | See both file and console output in real-time |
+| **Run with shell script** | Use `> /dev/null 2>&1 &` inside bash | Prevents double-logging |
 
 ## Understanding Log Levels
 
@@ -148,19 +188,49 @@ grep "HIGH LATENCY\|HIGH LOSS" logs/prediction_monitor.log | head -5
 
 ## Real-Time Log Monitoring
 
+When you run scripts in background via bash scripts, use `tail` to view logs in real-time:
+
+### Watch health checker for a single interface:
+```bash
+tail -f logs/health_checker_10_0_2_1.log
+```
+
+### Watch health checker for all interfaces:
+```bash
+tail -F logs/health_checker_*.log
+```
+
+### Monitor all warnings and critical errors:
+```bash
+tail -F logs/health_checker_*.log | grep "WARNING\|CRITICAL\|ERROR"
+```
+
 ### Watch orchestrator timeouts as they happen:
 ```bash
 tail -f logs/orchestrator.log | grep "TIMEOUT\|CRITICAL"
 ```
 
-### Monitor all health checker warnings:
-```bash
-tail -F logs/health_checker_*.log | grep "WARNING\|CRITICAL"
-```
-
 ### Follow prediction monitor scoring in real-time:
 ```bash
 tail -f logs/prediction_monitor.log | grep -v DEBUG
+```
+
+### Watch all logs simultaneously (in separate terminals):
+```bash
+# Terminal 1: Health metrics
+./run_health.sh
+# View in Terminal 2
+tail -F logs/health_checker_*.log
+
+# Terminal 3: Orchestrator
+python3 orchestrator.py > /dev/null 2>&1 &
+# View in Terminal 4
+tail -f logs/orchestrator.log
+
+# Terminal 5: Predictions
+python3 prediction_monitor.py > /dev/null 2>&1 &
+# View in Terminal 6
+tail -f logs/prediction_monitor.log
 ```
 
 ## Network Analysis Script
