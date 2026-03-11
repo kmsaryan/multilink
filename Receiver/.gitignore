@@ -1,6 +1,7 @@
 # Runtime SQLite state
 receiver_state.db
 receiver_state.db
+receiver_state.db-journal
 # Generated outputs
 results/
 received/
