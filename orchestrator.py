@@ -7,8 +7,35 @@ import socket as socklib
 import os
 import uuid
 import struct
+import logging
 from config import DB_PATH
 from db_utils import get_conn, mark_acked
+
+# Setup logging
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+
+def setup_orchestrator_logger():
+    logger = logging.getLogger('orchestrator')
+    logger.setLevel(logging.DEBUG)
+    
+    log_file = os.path.join(LOG_DIR, 'orchestrator.log')
+    fh = logging.FileHandler(log_file)
+    fh.setLevel(logging.DEBUG)
+    
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    
+    formatter = logging.Formatter('[%(asctime)s] [%(levelname)-8s] %(message)s', 
+                                  datefmt='%Y-%m-%d %H:%M:%S')
+    fh.setFormatter(formatter)
+    ch.setFormatter(formatter)
+    
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+    return logger
+
+orch_logger = setup_orchestrator_logger()
 
 def handle_retransmissions():
     """Handle retransmissions for chunks that timed out."""
@@ -23,7 +50,7 @@ def handle_retransmissions():
         (time.time() - 30,),
     )
     if cur.rowcount > 0:
-        print(f" Orchestrator: Reset {cur.rowcount} timed-out chunks to pending.")
+        orch_logger.warning(f"NETWORK TIMEOUT: Reset {cur.rowcount} timed-out chunks to pending (30s timeout)")
     conn.commit()
     conn.close()
 
@@ -108,30 +135,39 @@ class Orchestrator:
         conn.close()
 
     def run(self):
-        print("Orchestrator main loop started (Lightweight Mode).")
+        orch_logger.info("Orchestrator main loop started (Lightweight Mode).")
+        loop_count = 0
         while True:
-            interfaces = self.read_interface_scores()
+            loop_count += 1
+            try:
+                interfaces = self.read_interface_scores()
 
-            if not interfaces:
-                print("No healthy interfaces found in DB!")
+                if not interfaces:
+                    orch_logger.warning("No healthy interfaces found in DB!")
+                    time.sleep(0.5)
+                    continue
+
+                conn = get_conn(self.db_path)
+                cur = conn.cursor()
+                cur.execute("SELECT state, COUNT(*) FROM chunks GROUP BY state")
+                stats = cur.fetchall()
+                if stats:
+                    stats_dict = dict(stats)
+                    orch_logger.debug(f"Queue Status: {stats_dict}")
+                    print(f" Queue Status: {stats_dict}")
+                conn.close()
+
+                chunks = self.pick_next_chunks()
+                if chunks:
+                    orch_logger.debug(f"Orchestrator processing {len(chunks)} chunks...")
+                    print(f"Orchestrator processing {len(chunks)} chunks...")
+                    self.assign_chunks_to_interfaces(chunks, interfaces)
+                
+                handle_retransmissions()
                 time.sleep(0.5)
-                continue
-
-            conn = get_conn(self.db_path)
-            cur = conn.cursor()
-            cur.execute("SELECT state, COUNT(*) FROM chunks GROUP BY state")
-            stats = cur.fetchall()
-            if stats:
-                print(f" Queue Status: {dict(stats)}")
-            conn.close()
-
-            chunks = self.pick_next_chunks()
-            if chunks:
-                print(f"Orchestrator processing {len(chunks)} chunks...")
-                self.assign_chunks_to_interfaces(chunks, interfaces)
-            
-            handle_retransmissions()
-            time.sleep(0.5)
+            except Exception as e:
+                orch_logger.error(f"Orchestrator loop error: {e}", exc_info=True)
+                time.sleep(1)
 
 def setup_unix_socket():
     socket_path = "/tmp/orchestrator.sock"
@@ -161,21 +197,35 @@ def parse_ack(ack):
         return None, None
 
 def handle_acks(unix_sock):
-    print("ACK Handler thread started.")
+    orch_logger.info("ACK Handler thread started.")
+    ack_count = 0
+    error_count = 0
     while True:
         try:
             ack_data, _ = unix_sock.recvfrom(1024)
             p_id, c_idx = parse_ack(ack_data)
             if p_id and c_idx is not None:
                 mark_acked(DB_PATH, p_id, c_idx)
+                ack_count += 1
+                if ack_count % 1000 == 0:
+                    orch_logger.info(f"ACK Handler: Processed {ack_count} acknowledgments")
+            else:
+                error_count += 1
+                if error_count % 100 == 0:
+                    orch_logger.debug(f"ACK Handler: {error_count} malformed ACKs received")
         except Exception as e:
-            pass
+            orch_logger.debug(f"ACK handler exception (non-critical): {type(e).__name__}")
 
 if __name__ == "__main__":
     u_sock = setup_unix_socket()
+    orch_logger.info("Unix socket established for ACK communication")
     threading.Thread(target=handle_acks, args=(u_sock,), daemon=True).start()
     orch = Orchestrator(DB_PATH)
     try:
         orch.run()
     except KeyboardInterrupt:
-        print("\n Stopping Orchestrator...")
+        orch_logger.info("Orchestrator stopping via Ctrl+C...")
+        sys.exit(0)
+    except Exception as e:
+        orch_logger.critical(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)
