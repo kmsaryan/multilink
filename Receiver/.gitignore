@@ -8,6 +8,6 @@ received/
 # Python cache
 __pycache__/
 *.py[cod]
-
+config.cpython-310.pyc
 # Local virtual environment
 .venv/
