@@ -14,9 +14,12 @@ All logs are stored in the `logs/` directory:
 ├── health_checker_10_0_1_1.log    (Wi-Fi health metrics)
 ├── health_checker_10_0_2_1.log    (5G health metrics)
 ├── health_checker_10_0_3_1.log    (Satellite health metrics)
+├── sender_worker_10_0_1_1.log     (Wi-Fi data transmission)
+├── sender_worker_10_0_2_1.log     (5G data transmission)
+├── sender_worker_10_0_3_1.log     (Satellite data transmission)
 ├── orchestrator.log               (Data orchestration & timeouts)
 ├── prediction_monitor.log         (Network predictions & scoring)
-└── plot_results.log               (Analysis results)
+└── network_analysis.log           (Analysis results)
 ```
 
 ## How to Run Scripts with Proper Logging
