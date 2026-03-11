@@ -50,16 +50,15 @@ def send_metadata_packet(sock, payload_id, target_addr):
         header = struct.pack("!B", 4) + pid_bytes + struct.pack("!I", total)
         payload = header + fname.encode('utf-8')
         sock.sendto(payload, target_addr)
-        print(f"📄 Metadata Sent for {fname} ({total} chunks)")
+        print(f"Metadata Sent for {fname} ({total} chunks)")
 
 def run_worker(local_ip):
     sock = socklib.socket(socklib.AF_INET, socklib.SOCK_DGRAM)
     
-    # Supervisor Fix: Bind to IP only, let OS pick an ephemeral port (0)
     sock.bind((local_ip, 0))
     target_addr = (RECEIVER_IP, DATA_PORT)
     
-    print(f"🚀 Worker {local_ip} active. Target: {RECEIVER_IP}:{DATA_PORT}")
+    print(f" Worker {local_ip} active. Target: {RECEIVER_IP}:{DATA_PORT}")
     threading.Thread(target=receive_acks, args=(sock,), daemon=True).start()
 
     sent_metadata_cache = set()
@@ -121,7 +120,7 @@ def run_worker(local_ip):
         time.sleep(0.05)
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2: # No longer requires a port argument!
+    if len(sys.argv) != 2:
         print("Usage: python3 sender_worker.py <interface_ip>")
         sys.exit(1)
     run_worker(sys.argv[1])

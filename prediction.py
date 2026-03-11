@@ -6,7 +6,6 @@ from config import DB_PATH
 
 class CapacityPredictor:
     def __init__(self):
-        # We don't need heavy TensorFlow/Keras for simple 30s linear trends.
         # Numpy's polyfit is much faster for real-time networking.
         pass
 

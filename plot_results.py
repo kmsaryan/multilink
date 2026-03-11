@@ -72,7 +72,7 @@ def generate_predictive_report(payload_id):
         # Interface Name Mapping for cleaner output
         iface_name = "Wi-Fi" if ip == "10.0.1.1" else "5G" if ip == "10.0.2.1" else "Satellite"
 
-        print(f" 🌐 Interface {ip} ({iface_name}):")
+        print(f"  Interface {ip} ({iface_name}):")
         print(f"   - Current RTT:   {latest_actual_rtt:.2f}ms")
         print(f"   - 30s Forecast:  {predicted_30s_rtt:.2f}ms | Trend: {trend} (Slope: {m:.4f})")
         print(f"   - Avg Jitter:    {avg_jitter:.2f}ms")

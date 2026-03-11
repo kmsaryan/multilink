@@ -14,7 +14,7 @@ def register_payload(filepath):
     using a single batch transaction for maximum speed.
     """
     if not os.path.exists(filepath):
-        print(f"❌ Error: File {filepath} not found.")
+        print(f"Error: File {filepath} not found.")
         return None
 
     fname = os.path.basename(filepath)
@@ -24,11 +24,8 @@ def register_payload(filepath):
     # Generate Payload UUID
     payload_id = str(uuid.uuid4())
 
-    print(f"📦 Processing {fname} ({size} bytes)...")
+    print(f"Processing {fname} ({size} bytes)...")
 
-    # Supervisor Question: Why an intermediary file?
-    # Answer: Fault Tolerance. If the system loses power during transmission, 
-    # the original data is preserved locally and mapped to the UUID.
     new_filename = os.path.join(PAYLOAD_DIR, f"{payload_id}.bin")
     shutil.copy2(filepath, new_filename)
 
@@ -71,11 +68,11 @@ def register_payload(filepath):
         conn.commit()
         end_time = time.perf_counter()
         
-        print(f"✅ Registered {total_chunks} chunks in {end_time - start_time:.4f} seconds.")
-        print(f"🆔 Payload ID: {payload_id}")
+        print(f"Registered {total_chunks} chunks in {end_time - start_time:.4f} seconds.")
+        print(f" Payload ID: {payload_id}")
         
     except sqlite3.Error as e:
-        print(f"❌ Database Error: {e}")
+        print(f"Database Error: {e}")
         conn.rollback()
     finally:
         conn.close()
@@ -84,7 +81,7 @@ def register_payload(filepath):
 
 def monitor_folder(folder_path):
     """Continuously monitor folder for new files"""
-    print(f"👀 Monitoring {folder_path} for new files...")
+    print(f"Monitoring {folder_path} for new files...")
     processed_files = set()
     
     while True:
@@ -96,7 +93,7 @@ def monitor_folder(folder_path):
             for file in files:
                 filepath = os.path.join(folder_path, file)
                 if file not in processed_files:
-                    print(f"🆕 New file detected: {file}")
+                    print(f" New file detected: {file}")
                     register_payload(filepath)
                     processed_files.add(file)
         except Exception as e:

@@ -23,7 +23,7 @@ def handle_retransmissions():
         (time.time() - 30,),
     )
     if cur.rowcount > 0:
-        print(f"♻️ Orchestrator: Reset {cur.rowcount} timed-out chunks to pending.")
+        print(f" Orchestrator: Reset {cur.rowcount} timed-out chunks to pending.")
     conn.commit()
     conn.close()
 
@@ -108,7 +108,7 @@ class Orchestrator:
         conn.close()
 
     def run(self):
-        print("🚀 Orchestrator main loop started (Lightweight Mode).")
+        print("Orchestrator main loop started (Lightweight Mode).")
         while True:
             interfaces = self.read_interface_scores()
 
@@ -131,7 +131,6 @@ class Orchestrator:
                 self.assign_chunks_to_interfaces(chunks, interfaces)
             
             handle_retransmissions()
-            # SUPERVISOR FIX: Run orchestrator at 2Hz to match predictor speed
             time.sleep(0.5)
 
 def setup_unix_socket():
@@ -145,7 +144,6 @@ def setup_unix_socket():
 
 def parse_ack(ack):
     """
-    SUPERVISOR FIX: Fail-fast validation. 
     A valid ACK must be exactly 21 bytes (1 Type + 16 UUID + 4 Index).
     """
     if len(ack) != 21:
@@ -180,4 +178,4 @@ if __name__ == "__main__":
     try:
         orch.run()
     except KeyboardInterrupt:
-        print("\nStopping Orchestrator...")
+        print("\n Stopping Orchestrator...")
