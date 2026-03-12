@@ -16,15 +16,15 @@ cleanup() {
 trap cleanup SIGINT
 
 # Create logs directory if it doesn't exist
-mkdir -p /usr/local/bin/multilink/logs
+mkdir -p /usr/local/bin/multilink/sender/logs
 
 # Launch health checker workers for Wi-Fi, 5G, and SAT
 # Redirect stdout and stderr to /dev/null since Python FileHandler already writes to logs
-python3 /usr/local/bin/multilink/health_checker.py 10.0.1.1 > /dev/null 2>&1 &
-python3 /usr/local/bin/multilink/health_checker.py 10.0.2.1 > /dev/null 2>&1 &
-python3 /usr/local/bin/multilink/health_checker.py 10.0.3.1 > /dev/null 2>&1 &
+python3 /usr/local/bin/multilink/sender/health_checker.py 10.0.1.1 > /dev/null 2>&1 &
+python3 /usr/local/bin/multilink/sender/health_checker.py 10.0.2.1 > /dev/null 2>&1 &
+python3 /usr/local/bin/multilink/sender/health_checker.py 10.0.3.1 > /dev/null 2>&1 &
 
-echo "Health checker workers started. Logs in /usr/local/bin/multilink/logs/"
+echo "Health checker workers started. Logs in /usr/local/bin/multilink/sender/logs/"
 echo "Monitor logs in real-time:"
 echo "  tail -f logs/health_checker_10_0_1_1.log"
 echo "  tail -f logs/health_checker_10_0_2_1.log"

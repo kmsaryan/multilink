@@ -11,9 +11,9 @@ if IS_RECEIVER:
     RECEIVED_DIR = "/usr/local/bin/multilink/Receiver/received"
     RESULTS_DIR = "/usr/local/bin/multilink/Receiver/results"
 else:
-    DB_PATH = "/usr/local/bin/multilink/sender_coord.db"  # VM1 coordination database
-    PAYLOAD_DIR = "/usr/local/bin/multilink/payloads"
-    RECEIVED_DIR = "/usr/local/bin/multilink/received"
+    DB_PATH = "/usr/local/bin/multilink/sender/sender_coord.db"  # VM1 coordination database
+    PAYLOAD_DIR = "/usr/local/bin/multilink/sender/payloads"
+    RECEIVED_DIR = "/usr/local/bin/multilink/sender/received"
 
 RECEIVER_IP = "90.27.22.100"
 DATA_PORT = 9000

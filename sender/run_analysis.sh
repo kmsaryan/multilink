@@ -1,7 +1,7 @@
 #!/bin/bash
 # Network analysis wrapper - runs analysis with proper logging
 
-cd /usr/local/bin/multilink
+cd /usr/local/bin/multilink/sender
 
 echo "Starting network fluctuation analysis..."
 echo ""
