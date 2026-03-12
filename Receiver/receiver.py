@@ -22,26 +22,24 @@ def run_receiver():
         data_sock.bind(("0.0.0.0", DATA_PORT))
         data_sock.setblocking(False)
         sockets.append(data_sock)
-        print(f"📁 Receiver listening for DATA on port: {DATA_PORT}")
+        print(f" Receiver listening for DATA on port: {DATA_PORT}")
         
         health_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         health_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  
         health_sock.bind(("0.0.0.0", HEALTH_PORT))
         health_sock.setblocking(False)
         sockets.append(health_sock)
-        print(f"💓 Receiver listening for PROBES on port: {HEALTH_PORT}")
+        print(f" Receiver listening for PROBES on port: {HEALTH_PORT}")
     except Exception as e:
         print(f"Could not bind to ports: {e}")
         return
 
-    os.makedirs(RECEIVED_DIR, exist_ok=True)
-    
-    # High-speed RAM caching to prevent Database Locks
+    os.makedirs(RECEIVED_DIR, exist_ok=True)    
     stats = {}             # Tracks unique chunks received: { 'uuid': set(1, 2, 5...) }
     expected_chunks = {}   # Tracks total needed: { 'uuid': 874 }
     file_names = {}        # Tracks original filename: { 'uuid': 'testfile.data' }
     
-    print("🚀 Receiver is active. Waiting for multi-path traffic...")
+    print(" Receiver is active. Waiting for multi-path traffic...")
 
     while True:
         ready_socks, _, _ = select.select(sockets, [], [], 1.0)
@@ -76,7 +74,7 @@ def run_receiver():
                     file_names[pid_str] = filename
                     
                     register_metadata(pid_str, filename, total_chunks)
-                    print(f"📄 Metadata Received: {filename} ({total_chunks} chunks) via {addr[0]}")
+                    print(f"Metadata Received: {filename} ({total_chunks} chunks) via {addr[0]}")
                     continue
 
                 # Data (Type 0) or Retransmissions (Type 3)
@@ -86,7 +84,7 @@ def run_receiver():
 
                     if pid_str not in stats:
                         stats[pid_str] = set()
-                        print(f"📦 New payload detected: {pid_str}")
+                        print(f"New payload detected: {pid_str}")
 
                     file_path = os.path.join(RECEIVED_DIR, f"{pid_str}.bin")
                     mode = "r+b" if os.path.exists(file_path) else "wb"
@@ -102,16 +100,13 @@ def run_receiver():
                     ack_packet = b'\x00' + pid_bytes + struct.pack("!I", chunk_idx)
                     s.sendto(ack_packet, addr)
 
-                    # Print progress every 50 unique chunks
                     if current_received % 50 == 0:
                         target = expected_chunks.get(pid_str, "?")
                         percent = (current_received / target * 100) if isinstance(target, int) else 0
-                        print(f"🔄 [{pid_str[:8]}] Progress: {current_received}/{target} chunks ({percent:.1f}%)")
+                        print(f" [{pid_str[:8]}] Progress: {current_received}/{target} chunks ({percent:.1f}%)")
 
-                    # Log Arrival for Modeling (Async safe)
                     register_arrival(pid_str, chunk_idx, addr[0], len(pkt))
 
-                    # --- 100% Completion Check (Done entirely in RAM) ---
                     if pid_str in expected_chunks:
                         if current_received == expected_chunks[pid_str]:
                             original_name = file_names[pid_str]
@@ -120,9 +115,8 @@ def run_receiver():
 
                             if os.path.exists(bin_path):
                                 os.rename(bin_path, final_path)
-                                print(f"✅ SUCCESS: {original_name} fully reassembled from {current_received} chunks!")
+                                print(f" SUCCESS: {original_name} fully reassembled from {current_received} chunks!")
 
-                                # Only hit the database once it is 100% complete
                                 try:
                                     conn = sqlite3.connect(DB_PATH)
                                     cur = conn.cursor()
@@ -130,9 +124,7 @@ def run_receiver():
                                     conn.commit()
                                     conn.close()
                                 except Exception as e:
-                                    print(f"Failed to update final status in DB: {e}")
-                                
-                                # Remove from RAM to free memory
+                                    print(f"Failed to update final status in DB: {e}")                                
                                 del expected_chunks[pid_str]
 
             except Exception as e:

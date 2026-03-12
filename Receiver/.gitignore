@@ -1,6 +1,7 @@
 # Runtime SQLite state
 receiver_state.db
-
+receiver_state.db
+receiver_state.db-journal
 # Generated outputs
 results/
 received/
@@ -8,6 +9,6 @@ received/
 # Python cache
 __pycache__/
 *.py[cod]
-
+config.cpython-310.pyc
 # Local virtual environment
 .venv/
