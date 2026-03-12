@@ -5,7 +5,7 @@ env/
 __pycache__/
 *.py[cod]
 *.so
-
+*.txt
 # Local databases and sqlite artifacts
 *.db
 *.db-journal

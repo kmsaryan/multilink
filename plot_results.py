@@ -28,12 +28,11 @@ def generate_predictive_report(payload_id):
     conn = sqlite3.connect(DB_PATH)
     os.makedirs(REPORTS_DIR, exist_ok=True)
     
-    # 1. Fetch the actual history WITH the new Jitter and Loss columns
     query = "SELECT timestamp, uplink_rtt, throughput, jitter, loss_rate, interface_ip FROM interface_metrics_history"
     try:
         df = pd.read_sql_query(query, conn)
     except Exception as e:
-        print(f"Database error (Have you deleted the old DB yet?): {e}")
+        print(f"Database error: {e}")
         conn.close()
         return
         
@@ -61,7 +60,9 @@ def generate_predictive_report(payload_id):
         # RTT Trend
         m, b = np.polyfit(x, y_rtt, 1)
         latest_actual_rtt = y_rtt.iloc[-1]
-        predicted_30s_rtt = max(0.1, (m * (x.max() + 30)) + b)
+        
+        # SUPERVISOR FIX: Adjusted to 10-second forecast to match thesis methodology
+        predicted_10s_rtt = max(0.1, (m * (x.max() + 10)) + b)
         trend = "UP (Degrading)" if m > 0.01 else "DOWN (Improving)" if m < -0.01 else "STABLE"
 
         # Calculate Averages for the hidden metrics
@@ -72,24 +73,33 @@ def generate_predictive_report(payload_id):
         # Interface Name Mapping for cleaner output
         iface_name = "Wi-Fi" if ip == "10.0.1.1" else "5G" if ip == "10.0.2.1" else "Satellite"
 
-        print(f" 🌐 Interface {ip} ({iface_name}):")
-        print(f"   - Current RTT:   {latest_actual_rtt:.2f}ms")
-        print(f"   - 30s Forecast:  {predicted_30s_rtt:.2f}ms | Trend: {trend} (Slope: {m:.4f})")
+        print(f"  Interface {ip} ({iface_name}):")
+        if latest_actual_rtt > 900:
+            print(f"   - Current RTT:   TIMEOUT (Link Failed)")
+        else:
+            print(f"   - Current RTT:   {latest_actual_rtt:.2f}ms")
+            
+        print(f"   - 10s Forecast:  {predicted_10s_rtt:.2f}ms | Trend: {trend} (Slope: {m:.4f})")
         print(f"   - Avg Jitter:    {avg_jitter:.2f}ms")
         print(f"   - Avg Loss:      {avg_loss:.1f}%")
-        print(f"   - Avg Throughput:{avg_tput:.2f} Mbps")
+        
+        # SUPERVISOR FIX: Changed 'Mbps' to raw 'bps'
+        print(f"   - Avg Throughput:{avg_tput:.0f} bps")
         print(f"   --------------------------------------------------")
         
         # Plot Actual Data
         plt.scatter(subset['timestamp'], y_rtt, label=f"Actual: {iface_name}", alpha=0.5, s=15)
         
-        # Plot the "Model" (Trendline)
-        line_x = np.linspace(x.min(), x.max() + 30, 100)
-        plt.plot(line_x + subset['timestamp'].min(), m*line_x + b, '--', label=f"30s Model: {iface_name}")
+        # Plot the "Model" (Trendline) matching the 10s horizon
+        line_x = np.linspace(x.min(), x.max() + 10, 100)
+        plt.plot(line_x + subset['timestamp'].min(), m*line_x + b, '--', label=f"10s Model: {iface_name}")
 
-    plt.title(f"Short-Term Predictive Modeling (30s Window)\nPayload: {payload_id}")
+    # Set Y-axis limit so the 999.9 timeouts don't completely squash the healthy RTT variations
+    plt.ylim(0, 1050)
+
+    plt.title(f"Short-Term Predictive Modeling (10s Window)\nPayload: {payload_id}")
     plt.xlabel("Unix Timestamp (s)")
-    plt.ylabel("RTT (ms)")
+    plt.ylabel("RTT (ms) [999.9 = Timeout/Dropped Packet]")
     plt.legend(loc='upper left', bbox_to_anchor=(1, 1))
     plt.grid(True, linestyle=':', alpha=0.6)
     plt.tight_layout()
