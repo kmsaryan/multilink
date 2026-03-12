@@ -8,8 +8,8 @@ import os
 import sqlite3
 import threading
 import logging
-from db_utils import get_conn
-from config import DB_PATH, RECEIVER_IP, DATA_PORT
+from sender.db_utils import get_conn
+from sender.config import DB_PATH, RECEIVER_IP, DATA_PORT
 
 # Setup logging
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
