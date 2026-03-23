@@ -6,6 +6,8 @@ import os
 
 DB_PATH = "/usr/local/bin/multilink/sender_coord.db"
 REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "modeling_reports")
+SAMPLES_FOR_REGRESSION = 100
+FORECAST_HORIZON_SECONDS = 10
 
 def get_latest_payload_id():
     """Fetches the most recently registered payload ID from the database."""
@@ -48,7 +50,7 @@ def generate_predictive_report(payload_id):
     print(f"{'-'*50}")
 
     for ip in df['interface_ip'].unique():
-        subset = df[df['interface_ip'] == ip].tail(50) 
+        subset = df[df['interface_ip'] == ip].tail(SAMPLES_FOR_REGRESSION)
         
         if len(subset) < 2:
             continue
@@ -61,8 +63,7 @@ def generate_predictive_report(payload_id):
         m, b = np.polyfit(x, y_rtt, 1)
         latest_actual_rtt = y_rtt.iloc[-1]
         
-        # SUPERVISOR FIX: Adjusted to 10-second forecast to match thesis methodology
-        predicted_10s_rtt = max(0.1, (m * (x.max() + 10)) + b)
+        predicted_horizon_rtt = max(0.1, (m * (x.max() + FORECAST_HORIZON_SECONDS)) + b)
         trend = "UP (Degrading)" if m > 0.01 else "DOWN (Improving)" if m < -0.01 else "STABLE"
 
         # Calculate Averages for the hidden metrics
@@ -79,25 +80,23 @@ def generate_predictive_report(payload_id):
         else:
             print(f"   - Current RTT:   {latest_actual_rtt:.2f}ms")
             
-        print(f"   - 10s Forecast:  {predicted_10s_rtt:.2f}ms | Trend: {trend} (Slope: {m:.4f})")
+        print(f"   - {FORECAST_HORIZON_SECONDS}s Forecast:  {predicted_horizon_rtt:.2f}ms | Trend: {trend} (Slope: {m:.4f})")
         print(f"   - Avg Jitter:    {avg_jitter:.2f}ms")
-        print(f"   - Avg Loss:      {avg_loss:.1f}%")
-        
-        # SUPERVISOR FIX: Changed 'Mbps' to raw 'bps'
+        print(f"   - Avg Loss:      {avg_loss:.1f}%")        
         print(f"   - Avg Throughput:{avg_tput:.0f} bps")
         print(f"   --------------------------------------------------")
         
         # Plot Actual Data
         plt.scatter(subset['timestamp'], y_rtt, label=f"Actual: {iface_name}", alpha=0.5, s=15)
         
-        # Plot the "Model" (Trendline) matching the 10s horizon
-        line_x = np.linspace(x.min(), x.max() + 10, 100)
-        plt.plot(line_x + subset['timestamp'].min(), m*line_x + b, '--', label=f"10s Model: {iface_name}")
+        # Plot the model trendline out to forecast horizon
+        line_x = np.linspace(x.min(), x.max() + FORECAST_HORIZON_SECONDS, 100)
+        plt.plot(line_x + subset['timestamp'].min(), m*line_x + b, '--', label=f"{FORECAST_HORIZON_SECONDS}s Model: {iface_name}")
 
     # Set Y-axis limit so the 999.9 timeouts don't completely squash the healthy RTT variations
     plt.ylim(0, 1050)
 
-    plt.title(f"Short-Term Predictive Modeling (10s Window)\nPayload: {payload_id}")
+    plt.title(f"Short-Term Predictive Modeling ({FORECAST_HORIZON_SECONDS}s Horizon)\nPayload: {payload_id}")
     plt.xlabel("Unix Timestamp (s)")
     plt.ylabel("RTT (ms) [999.9 = Timeout/Dropped Packet]")
     plt.legend(loc='upper left', bbox_to_anchor=(1, 1))
