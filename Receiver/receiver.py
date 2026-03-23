@@ -6,7 +6,7 @@ import os
 import select
 import sqlite3
 from config import CHUNK_SIZE, RECEIVED_DIR, DATA_PORT, HEALTH_PORT, DB_PATH
-from db_utils import register_metadata, register_arrival, init_receiver_db
+from db_utils import register_metadata, register_arrival, init_receiver_db, mark_transfer_complete
 
 def run_receiver():
     db_dir = os.path.dirname(DB_PATH)
@@ -126,6 +126,7 @@ def run_receiver():
                                 except Exception as e:
                                     print(f"Failed to update final status in DB: {e}")                                
                                 del expected_chunks[pid_str]
+                                mark_transfer_complete(pid_str)
 
             except Exception as e:
                 pass

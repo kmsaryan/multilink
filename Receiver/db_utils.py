@@ -16,7 +16,9 @@ def init_receiver_db():
             filename TEXT,
             total_chunks INT,
             received_chunks INT DEFAULT 0,
-            status TEXT DEFAULT 'receiving'
+            status TEXT DEFAULT 'receiving',
+            metadata_arrived_time REAL,
+            completion_time REAL
         )
     """)
     # Table to log every packet arrival for plotting
@@ -41,9 +43,9 @@ def register_metadata(pid, filename, total_chunks):
     cur = conn.cursor()
     try:
         cur.execute("""
-            INSERT OR REPLACE INTO file_map (payload_id, filename, total_chunks) 
-            VALUES (?, ?, ?)
-        """, (pid, filename, total_chunks))
+            INSERT OR REPLACE INTO file_map (payload_id, filename, total_chunks, metadata_arrived_time) 
+            VALUES (?, ?, ?, ?)
+        """, (pid, filename, total_chunks, time.time()))
         conn.commit()
     except sqlite3.Error as e:
         print(f"DB Error in register_metadata: {e}")
@@ -69,5 +71,21 @@ def register_arrival(pid, idx, ip, size):
         conn.commit()
     except sqlite3.Error as e:
         print(f"DB Error in register_arrival: {e}")
+
+    def mark_transfer_complete(pid):
+        """Records completion timestamp when all chunks are received."""
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        try:
+            cur.execute("""
+                UPDATE file_map 
+                SET completion_time = ?, status = 'completed'
+                WHERE payload_id = ? AND status = 'receiving'
+            """, (time.time(), pid))
+            conn.commit()
+        except sqlite3.Error as e:
+            print(f"DB Error in mark_transfer_complete: {e}")
+        finally:
+            conn.close()
     finally:
         conn.close()

@@ -19,7 +19,7 @@ def generate_report():
     
     # 1. Get the latest file info
     file_info = conn.execute("""
-        SELECT payload_id, filename, total_chunks, received_chunks 
+        SELECT payload_id, filename, total_chunks, received_chunks, metadata_arrived_time, completion_time 
         FROM file_map 
         ORDER BY rowid DESC LIMIT 1
     """).fetchone()
@@ -29,12 +29,22 @@ def generate_report():
         conn.close()
         return
 
-    pid, fname, total, received = file_info
+    pid, fname, total, received, metadata_time, completion_time = file_info
     print(f"\n{'-'*60}")
     print(f"REPORT FOR: {fname}")
     print(f" UUID: {pid}")
     print(f" Progress: {received}/{total} chunks ({(received/total)*100:.1f}%)")
     print(f"{'-'*60}")
+
+    # --- TOTAL TRANSFER DURATION ---
+    if metadata_time and completion_time:
+        total_duration = completion_time - metadata_time
+        print(f"\nTRANSFER TIMELINE")
+        print(f" Total transfer time (metadata → completion): {total_duration:.3f} seconds")
+        print(f" File size: {received * 1200 / (1024*1024):.2f} MB")
+        overall_mbps = (received * 1200 * 8) / (total_duration * 1000000) if total_duration > 0 else 0
+        print(f" Overall throughput: {overall_mbps:.2f} Mbps")
+        print("")
 
     # 2. Detailed Interface Analysis
     query = """
@@ -48,6 +58,7 @@ def generate_report():
         GROUP BY source_ip
     """
     df = pd.read_sql_query(query, conn, params=(pid,))
+        print(f"PER-INTERFACE DATA TRANSFER ANALYSIS")
     
     if df.empty:
         print(" No arrival logs found for this UUID.")
