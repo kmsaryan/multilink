@@ -4,7 +4,6 @@ import struct
 import uuid
 import os
 import select
-import sqlite3
 from config import CHUNK_SIZE, RECEIVED_DIR, DATA_PORT, HEALTH_PORT, DB_PATH
 from db_utils import register_metadata, register_arrival, init_receiver_db, mark_transfer_complete
 
@@ -117,16 +116,8 @@ def run_receiver():
                                 os.rename(bin_path, final_path)
                                 print(f" SUCCESS: {original_name} fully reassembled from {current_received} chunks!")
 
-                                try:
-                                    conn = sqlite3.connect(DB_PATH)
-                                    cur = conn.cursor()
-                                    cur.execute("UPDATE file_map SET status='completed' WHERE payload_id=?", (pid_str,))
-                                    conn.commit()
-                                    conn.close()
-                                except Exception as e:
-                                    print(f"Failed to update final status in DB: {e}")                                
-                                del expected_chunks[pid_str]
                                 mark_transfer_complete(pid_str)
+                                del expected_chunks[pid_str]
 
             except Exception as e:
                 pass

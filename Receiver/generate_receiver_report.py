@@ -45,6 +45,10 @@ def generate_report():
         overall_mbps = (received * 1200 * 8) / (total_duration * 1000000) if total_duration > 0 else 0
         print(f" Overall throughput: {overall_mbps:.2f} Mbps")
         print("")
+    else:
+        print("\nTRANSFER TIMELINE")
+        print(" Total transfer time (metadata → completion): unavailable (transfer not completed or timestamps missing)")
+        print("")
 
     # 2. Detailed Interface Analysis
     query = """
@@ -58,7 +62,7 @@ def generate_report():
         GROUP BY source_ip
     """
     df = pd.read_sql_query(query, conn, params=(pid,))
-        print(f"PER-INTERFACE DATA TRANSFER ANALYSIS")
+    print("PER-INTERFACE DATA TRANSFER ANALYSIS")
     
     if df.empty:
         print(" No arrival logs found for this UUID.")

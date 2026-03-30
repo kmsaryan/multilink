@@ -71,21 +71,21 @@ def register_arrival(pid, idx, ip, size):
         conn.commit()
     except sqlite3.Error as e:
         print(f"DB Error in register_arrival: {e}")
+    finally:
+        conn.close()
 
-    def mark_transfer_complete(pid):
-        """Records completion timestamp when all chunks are received."""
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        try:
-            cur.execute("""
-                UPDATE file_map 
-                SET completion_time = ?, status = 'completed'
-                WHERE payload_id = ? AND status = 'receiving'
-            """, (time.time(), pid))
-            conn.commit()
-        except sqlite3.Error as e:
-            print(f"DB Error in mark_transfer_complete: {e}")
-        finally:
-            conn.close()
+def mark_transfer_complete(pid):
+    """Records completion timestamp when all chunks are received."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE file_map 
+            SET completion_time = ?, status = 'completed'
+            WHERE payload_id = ? AND status = 'receiving'
+        """, (time.time(), pid))
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"DB Error in mark_transfer_complete: {e}")
     finally:
         conn.close()
