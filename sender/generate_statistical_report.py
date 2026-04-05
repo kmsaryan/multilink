@@ -8,6 +8,12 @@ import statistics
 from typing import Dict, List, Optional
 
 import config
+from db_utils import (
+    infer_scenario_from_filename,
+    init_sender_db,
+    store_run_statistics,
+    store_scenario_statistics,
+)
 
 
 DEFAULT_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "modeling_reports", "statistical_reports")
@@ -109,6 +115,7 @@ def build_markdown_summary(
     sender_csv: str,
     iface_csv: str,
     prediction_csv: str,
+    scenario_csv: str,
 ) -> None:
     ack_rates = [float(r["acked_ratio_pct"]) for r in payload_rows if r.get("acked_ratio_pct") is not None]
     send_spans = [float(r["send_span_s"]) for r in payload_rows if r.get("send_span_s") is not None]
@@ -120,6 +127,7 @@ def build_markdown_summary(
     lines.append(f"- Per-payload sender metrics: `{sender_csv}`")
     lines.append(f"- Interface health summary: `{iface_csv}`")
     lines.append(f"- Prediction summary: `{prediction_csv}`")
+    lines.append(f"- Scenario significance snapshot: `{scenario_csv}`")
     lines.append("")
     lines.append("## Sender KPIs")
     lines.append("")
@@ -131,6 +139,7 @@ def build_markdown_summary(
     lines.append("")
     lines.append("- This report is sender-only and uses only sender DB tables (`payloads`, `chunks`, `interface_stats`, `interface_metrics_history`, `interface_predictions`).")
     lines.append("- `send_span_s` is computed from chunk `last_sent` min/max and represents sender transmission activity span, not receiver completion time.")
+    lines.append("- `run_statistics` stores one row per payload/run, while `scenario_statistics` stores appended snapshots for each scenario.")
 
     with open(out_path, "w") as handle:
         handle.write("\n".join(lines) + "\n")
@@ -146,6 +155,7 @@ def main() -> None:
         raise SystemExit(f"Sender DB not found: {args.sender_db}")
 
     os.makedirs(args.out_dir, exist_ok=True)
+    init_sender_db(args.sender_db)
 
     conn = sqlite3.connect(args.sender_db)
     conn.row_factory = sqlite3.Row
@@ -161,12 +171,14 @@ def main() -> None:
 
     per_payload_rows: List[Dict[str, object]] = []
     iface_distribution_rows: List[Dict[str, object]] = []
+    scenario_transfer_times: Dict[str, List[float]] = {}
 
     for row in payload_base_rows:
         payload_id = row["payload_id"]
         filename = row["filename"]
         total_chunks_declared = int(row["total_chunks"] or 0)
         status = row["status"]
+        scenario = infer_scenario_from_filename(filename)
 
         chunk_stats = fetch_chunk_stats(conn, payload_id)
         total_rows = int(chunk_stats["total_rows"])
@@ -181,10 +193,32 @@ def main() -> None:
         if first_last_sent is not None and last_last_sent is not None and last_last_sent >= first_last_sent:
             send_span_s = float(last_last_sent - first_last_sent)
 
+        store_run_statistics(
+            args.sender_db,
+            payload_id,
+            filename,
+            scenario,
+            total_chunks_declared,
+            total_rows,
+            acked_rows,
+            pending_rows,
+            sending_rows,
+            acked_ratio_pct,
+            chunk_stats["avg_attempts"],
+            chunk_stats["max_attempts"],
+            send_span_s,
+            first_last_sent,
+            last_last_sent,
+        )
+
+        if send_span_s is not None:
+            scenario_transfer_times.setdefault(scenario, []).append(send_span_s)
+
         per_payload_rows.append(
             {
                 "payload_id": payload_id,
                 "filename": filename,
+                "scenario": scenario,
                 "status": status,
                 "total_chunks_declared": total_chunks_declared,
                 "chunks_rows": total_rows,
@@ -211,6 +245,33 @@ def main() -> None:
                     "assigned_share_pct": (count / total_assigned * 100) if total_assigned > 0 else 0.0,
                 }
             )
+
+    scenario_snapshot_rows: List[Dict[str, object]] = []
+    for scenario, transfer_times in scenario_transfer_times.items():
+        if not transfer_times:
+            continue
+        mean_value = safe_mean(transfer_times)
+        variance_value = statistics.variance(transfer_times) if len(transfer_times) >= 2 else None
+        std_value = safe_stdev(transfer_times)
+        min_value = min(transfer_times)
+        max_value = max(transfer_times)
+        ci95_value = ci95_half_width(transfer_times)
+
+        store_scenario_statistics(args.sender_db, scenario, transfer_times, source_payload_count=len(transfer_times))
+
+        scenario_snapshot_rows.append(
+            {
+                "scenario": scenario,
+                "sample_count": len(transfer_times),
+                "mean_transfer_time_s": mean_value,
+                "variance_transfer_time_s": variance_value,
+                "std_transfer_time_s": std_value,
+                "min_transfer_time_s": min_value,
+                "max_transfer_time_s": max_value,
+                "ci95_half_width_s": ci95_value,
+                "source_payload_count": len(transfer_times),
+            }
+        )
 
     iface_health_rows: List[Dict[str, object]] = []
     if table_exists(conn, "interface_stats"):
@@ -263,6 +324,7 @@ def main() -> None:
     iface_dist_csv = os.path.join(args.out_dir, "sender_interface_assignment.csv")
     iface_health_csv = os.path.join(args.out_dir, "sender_interface_health.csv")
     prediction_csv = os.path.join(args.out_dir, "sender_prediction_snapshot.csv")
+    scenario_csv = os.path.join(args.out_dir, "scenario_statistics_snapshot.csv")
     summary_md = os.path.join(args.out_dir, "sender_statistical_summary.md")
 
     write_csv(
@@ -271,6 +333,7 @@ def main() -> None:
         [
             "payload_id",
             "filename",
+            "scenario",
             "status",
             "total_chunks_declared",
             "chunks_rows",
@@ -313,6 +376,22 @@ def main() -> None:
         ["interface_ip", "predicted_rtt", "predicted_bitrate", "avg_jitter", "avg_loss", "blended_score", "timestamp"],
     )
 
+    write_csv(
+        scenario_csv,
+        scenario_snapshot_rows,
+        [
+            "scenario",
+            "sample_count",
+            "mean_transfer_time_s",
+            "variance_transfer_time_s",
+            "std_transfer_time_s",
+            "min_transfer_time_s",
+            "max_transfer_time_s",
+            "ci95_half_width_s",
+            "source_payload_count",
+        ],
+    )
+
     build_markdown_summary(
         summary_md,
         n_payloads=len(per_payload_rows),
@@ -320,6 +399,7 @@ def main() -> None:
         sender_csv=sender_csv,
         iface_csv=iface_health_csv,
         prediction_csv=prediction_csv,
+        scenario_csv=scenario_csv,
     )
 
     print("Sender statistical report generated:")
@@ -327,6 +407,7 @@ def main() -> None:
     print(f" - {iface_dist_csv}")
     print(f" - {iface_health_csv}")
     print(f" - {prediction_csv}")
+    print(f" - {scenario_csv}")
     print(f" - {summary_md}")
 
 

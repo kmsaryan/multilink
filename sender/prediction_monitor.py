@@ -112,8 +112,12 @@ def append_prediction_history(interface_ip, current_rtt, predicted_rtt, current_
     conn.close()
 
 def generate_monitor_plot(window_seconds=PLOT_WINDOW_SECONDS):
+    # Plotting is intentionally disabled to keep prediction monitoring active
+    # while preventing graph generation and file writes.
     if not ENABLE_MONITOR_PLOTTING:
         return
+
+    return
 
     try:
         import matplotlib
