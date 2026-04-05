@@ -6,10 +6,17 @@ import math
 import os
 import sqlite3
 import statistics
+from datetime import datetime
 from collections import defaultdict
 from typing import Dict, List, Optional
 
 import config
+from db_utils import (
+    init_receiver_db,
+    infer_scenario_from_filename,
+    store_run_statistics,
+    store_scenario_statistics,
+)
 
 
 DEFAULT_OUTPUT_DIR = os.path.join(config.RESULTS_DIR, "statistical_reports")
@@ -43,17 +50,6 @@ def sha256_file(file_path: str) -> Optional[str]:
     return digest.hexdigest()
 
 
-def infer_scenario(filename: str) -> str:
-    lowered = filename.lower()
-    if "los" in lowered and "nlos" not in lowered:
-        return "LOS"
-    if "nlos" in lowered:
-        return "NLOS"
-    if "__" in filename:
-        return filename.split("__", 1)[0]
-    return "UNSPECIFIED"
-
-
 def fetch_payload_rows(conn: sqlite3.Connection) -> List[sqlite3.Row]:
     conn.row_factory = sqlite3.Row
     query = """
@@ -76,6 +72,31 @@ def fetch_interface_counts(conn: sqlite3.Connection, payload_id: str) -> Dict[st
         (payload_id,),
     ).fetchall()
     return {row[0]: row[1] for row in rows}
+
+
+def fetch_chunk_window_times(conn: sqlite3.Connection, payload_id: str) -> Dict[str, Optional[float]]:
+    row = conn.execute(
+        """
+        SELECT MIN(arrival_time) AS first_arrival_time,
+               MAX(arrival_time) AS last_arrival_time
+        FROM arrival_logs
+        WHERE payload_id = ?
+        """,
+        (payload_id,),
+    ).fetchone()
+
+    first_arrival_time = row[0] if row else None
+    last_arrival_time = row[1] if row else None
+
+    chunk_to_chunk_time_s = None
+    if first_arrival_time is not None and last_arrival_time is not None and last_arrival_time >= first_arrival_time:
+        chunk_to_chunk_time_s = float(last_arrival_time - first_arrival_time)
+
+    return {
+        "first_arrival_time": first_arrival_time,
+        "last_arrival_time": last_arrival_time,
+        "chunk_to_chunk_time_s": chunk_to_chunk_time_s,
+    }
 
 
 def compute_receiver_hash(received_dir: str, filename: str, payload_id: str) -> Optional[str]:
@@ -106,6 +127,7 @@ def build_markdown_summary(
     scenario_summary_rows: List[Dict[str, object]],
     per_run_csv: str,
     scenario_csv: str,
+    scenario_snapshot_csv: str,
     iface_csv: str,
 ) -> None:
     lines = []
@@ -114,22 +136,29 @@ def build_markdown_summary(
     lines.append(f"- Total runs analysed: **{run_count}**")
     lines.append(f"- Per-run metrics: `{per_run_csv}`")
     lines.append(f"- Scenario summary: `{scenario_csv}`")
+    lines.append(f"- Scenario snapshot: `{scenario_snapshot_csv}`")
     lines.append(f"- Interface contribution summary: `{iface_csv}`")
     lines.append("")
     lines.append("## Scenario Summary")
     lines.append("")
-    lines.append("| Scenario | Runs | Completion Rate | File Present Rate | Mean Transfer Time (s) ± CI95 | Mean Goodput (Mbps) ± CI95 |")
-    lines.append("|---|---:|---:|---:|---:|---:|")
+    lines.append("| Scenario | Runs | Completion Rate | File Present Rate | Chunk-to-Chunk Mean ± CI95 | Chunk-to-Chunk Min/Max | File-to-File Mean ± CI95 | File-to-File Min/Max | Mean Goodput (Mbps) ± CI95 |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
 
     for row in scenario_summary_rows:
         lines.append(
-            "| {scenario} | {n_runs} | {completion_rate_pct:.1f}% | {file_present_rate_pct:.1f}% | {t_mean} ± {t_ci} | {g_mean} ± {g_ci} |".format(
+            "| {scenario} | {n_runs} | {completion_rate_pct:.1f}% | {file_present_rate_pct:.1f}% | {ctc_mean} ± {ctc_ci} | {ctc_min} / {ctc_max} | {ftf_mean} ± {ftf_ci} | {ftf_min} / {ftf_max} | {g_mean} ± {g_ci} |".format(
                 scenario=row["scenario"],
                 n_runs=int(row["n_runs"]),
                 completion_rate_pct=float(row["completion_rate_pct"]),
                 file_present_rate_pct=float(row["file_present_rate_pct"]),
-                t_mean=fmt_number(row.get("transfer_time_mean_s"), 3),
-                t_ci=fmt_number(row.get("transfer_time_ci95_s"), 3),
+                ctc_mean=fmt_number(row.get("chunk_to_chunk_time_mean_s"), 3),
+                ctc_ci=fmt_number(row.get("chunk_to_chunk_time_ci95_s"), 3),
+                ctc_min=fmt_number(row.get("chunk_to_chunk_time_min_s"), 3),
+                ctc_max=fmt_number(row.get("chunk_to_chunk_time_max_s"), 3),
+                ftf_mean=fmt_number(row.get("file_to_file_time_mean_s"), 3),
+                ftf_ci=fmt_number(row.get("file_to_file_time_ci95_s"), 3),
+                ftf_min=fmt_number(row.get("file_to_file_time_min_s"), 3),
+                ftf_max=fmt_number(row.get("file_to_file_time_max_s"), 3),
                 g_mean=fmt_number(row.get("goodput_mean_mbps"), 3),
                 g_ci=fmt_number(row.get("goodput_ci95_mbps"), 3),
             )
@@ -149,15 +178,20 @@ def build_markdown_summary(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate receiver-only multi-run statistical report from receiver DB.")
+    parser.add_argument("scenario_name", nargs="?", default=None, help="Optional scenario label to apply to all runs (e.g., LOS, NLOS, SCENARIO_A). If omitted, scenario is inferred from filename.")
     parser.add_argument("--receiver-db", default=config.DB_PATH, help="Path to receiver SQLite DB.")
     parser.add_argument("--received-dir", default=config.RECEIVED_DIR, help="Path to receiver reassembled files directory.")
     parser.add_argument("--out-dir", default=DEFAULT_OUTPUT_DIR, help="Output directory for CSV/MD summary.")
+    parser.add_argument("--report-id", default=None, help="Optional identifier suffix for output files (default: timestamp).")
     args = parser.parse_args()
 
     if not os.path.exists(args.receiver_db):
         raise SystemExit(f"Receiver DB not found: {args.receiver_db}")
 
     os.makedirs(args.out_dir, exist_ok=True)
+    init_receiver_db()
+
+    report_id = args.report_id or datetime.now().strftime("%Y%m%d_%H%M%S")
 
     conn = sqlite3.connect(args.receiver_db)
     payload_rows = fetch_payload_rows(conn)
@@ -178,18 +212,24 @@ def main() -> None:
         metadata_time = row["metadata_arrived_time"]
         completion_time = row["completion_time"]
 
-        transfer_time_s = None
+        file_to_file_time_s = None
         if metadata_time and completion_time and completion_time >= metadata_time:
-            transfer_time_s = float(completion_time - metadata_time)
+            file_to_file_time_s = float(completion_time - metadata_time)
+
+        chunk_window = fetch_chunk_window_times(conn, payload_id)
+        chunk_to_chunk_time_s = chunk_window["chunk_to_chunk_time_s"]
 
         completion_ratio = (received_chunks / total_chunks) if total_chunks > 0 else 0.0
         completed = bool(status == "completed" or (total_chunks > 0 and received_chunks >= total_chunks))
 
         goodput_mbps = None
-        if transfer_time_s and transfer_time_s > 0:
-            goodput_mbps = (received_chunks * config.CHUNK_SIZE * 8) / (transfer_time_s * 1_000_000)
+        if file_to_file_time_s and file_to_file_time_s > 0:
+            goodput_mbps = (received_chunks * config.CHUNK_SIZE * 8) / (file_to_file_time_s * 1_000_000)
 
-        scenario = infer_scenario(filename)
+        if args.scenario_name:
+            scenario = args.scenario_name
+        else:
+            scenario = infer_scenario_from_filename(filename)
         receiver_sha = compute_receiver_hash(args.received_dir, filename, payload_id)
         file_present = 1 if receiver_sha else 0
 
@@ -203,13 +243,36 @@ def main() -> None:
                 "total_chunks": total_chunks,
                 "received_chunks": received_chunks,
                 "completion_ratio": completion_ratio,
-                "transfer_time_s": transfer_time_s,
+                "chunk_to_chunk_time_s": chunk_to_chunk_time_s,
+                "file_to_file_time_s": file_to_file_time_s,
                 "goodput_mbps": goodput_mbps,
                 "metadata_arrived_time": metadata_time,
+                "first_arrival_time": chunk_window["first_arrival_time"],
+                "last_arrival_time": chunk_window["last_arrival_time"],
                 "completion_time": completion_time,
                 "receiver_sha256": receiver_sha,
                 "file_present": file_present,
             }
+        )
+
+        store_run_statistics(
+            payload_id=payload_id,
+            report_id=report_id,
+            filename=filename,
+            scenario=scenario,
+            status=status,
+            total_chunks=total_chunks,
+            received_chunks=received_chunks,
+            completion_ratio=completion_ratio,
+            chunk_to_chunk_time_s=chunk_to_chunk_time_s,
+            file_to_file_time_s=file_to_file_time_s,
+            goodput_mbps=goodput_mbps,
+            metadata_arrived_time=metadata_time,
+            first_arrival_time=chunk_window["first_arrival_time"],
+            last_arrival_time=chunk_window["last_arrival_time"],
+            completion_time=completion_time,
+            receiver_sha256=receiver_sha,
+            file_present=file_present,
         )
 
         iface_counts = fetch_interface_counts(conn, payload_id)
@@ -235,7 +298,8 @@ def main() -> None:
     for scenario, runs in sorted(by_scenario.items()):
         completion_vals = [float(run["completed"]) for run in runs]
         file_present_vals = [float(run["file_present"]) for run in runs]
-        time_vals = [float(run["transfer_time_s"]) for run in runs if run["transfer_time_s"] is not None]
+        chunk_to_chunk_vals = [float(run["chunk_to_chunk_time_s"]) for run in runs if run["chunk_to_chunk_time_s"] is not None]
+        file_to_file_vals = [float(run["file_to_file_time_s"]) for run in runs if run["file_to_file_time_s"] is not None]
         goodput_vals = [float(run["goodput_mbps"]) for run in runs if run["goodput_mbps"] is not None]
 
         scenario_summary_rows.append(
@@ -244,19 +308,29 @@ def main() -> None:
                 "n_runs": len(runs),
                 "completion_rate_pct": safe_mean(completion_vals) * 100 if completion_vals else 0.0,
                 "file_present_rate_pct": safe_mean(file_present_vals) * 100 if file_present_vals else 0.0,
-                "transfer_time_mean_s": safe_mean(time_vals),
-                "transfer_time_std_s": safe_stdev(time_vals),
-                "transfer_time_ci95_s": ci95_half_width(time_vals),
+                "chunk_to_chunk_time_mean_s": safe_mean(chunk_to_chunk_vals),
+                "chunk_to_chunk_time_std_s": safe_stdev(chunk_to_chunk_vals),
+                "chunk_to_chunk_time_min_s": min(chunk_to_chunk_vals) if chunk_to_chunk_vals else None,
+                "chunk_to_chunk_time_max_s": max(chunk_to_chunk_vals) if chunk_to_chunk_vals else None,
+                "chunk_to_chunk_time_ci95_s": ci95_half_width(chunk_to_chunk_vals),
+                "file_to_file_time_mean_s": safe_mean(file_to_file_vals),
+                "file_to_file_time_std_s": safe_stdev(file_to_file_vals),
+                "file_to_file_time_min_s": min(file_to_file_vals) if file_to_file_vals else None,
+                "file_to_file_time_max_s": max(file_to_file_vals) if file_to_file_vals else None,
+                "file_to_file_time_ci95_s": ci95_half_width(file_to_file_vals),
                 "goodput_mean_mbps": safe_mean(goodput_vals),
                 "goodput_std_mbps": safe_stdev(goodput_vals),
+                "goodput_min_mbps": min(goodput_vals) if goodput_vals else None,
+                "goodput_max_mbps": max(goodput_vals) if goodput_vals else None,
                 "goodput_ci95_mbps": ci95_half_width(goodput_vals),
             }
         )
 
-    per_run_csv = os.path.join(args.out_dir, "per_run_metrics.csv")
-    scenario_csv = os.path.join(args.out_dir, "scenario_summary.csv")
-    iface_csv = os.path.join(args.out_dir, "interface_contribution.csv")
-    summary_md = os.path.join(args.out_dir, "statistical_summary.md")
+    per_run_csv = os.path.join(args.out_dir, f"per_run_metrics_{report_id}.csv")
+    scenario_csv = os.path.join(args.out_dir, f"scenario_summary_{report_id}.csv")
+    scenario_snapshot_csv = os.path.join(args.out_dir, f"scenario_statistics_snapshot_{report_id}.csv")
+    iface_csv = os.path.join(args.out_dir, f"interface_contribution_{report_id}.csv")
+    summary_md = os.path.join(args.out_dir, f"statistical_summary_{report_id}.md")
 
     write_csv(
         per_run_csv,
@@ -270,9 +344,12 @@ def main() -> None:
             "total_chunks",
             "received_chunks",
             "completion_ratio",
-            "transfer_time_s",
+            "chunk_to_chunk_time_s",
+            "file_to_file_time_s",
             "goodput_mbps",
             "metadata_arrived_time",
+            "first_arrival_time",
+            "last_arrival_time",
             "completion_time",
             "receiver_sha256",
             "file_present",
@@ -287,14 +364,51 @@ def main() -> None:
             "n_runs",
             "completion_rate_pct",
             "file_present_rate_pct",
-            "transfer_time_mean_s",
-            "transfer_time_std_s",
-            "transfer_time_ci95_s",
+            "chunk_to_chunk_time_mean_s",
+            "chunk_to_chunk_time_std_s",
+            "chunk_to_chunk_time_min_s",
+            "chunk_to_chunk_time_max_s",
+            "chunk_to_chunk_time_ci95_s",
+            "file_to_file_time_mean_s",
+            "file_to_file_time_std_s",
+            "file_to_file_time_min_s",
+            "file_to_file_time_max_s",
+            "file_to_file_time_ci95_s",
             "goodput_mean_mbps",
             "goodput_std_mbps",
+            "goodput_min_mbps",
+            "goodput_max_mbps",
             "goodput_ci95_mbps",
         ],
     )
+
+    write_csv(
+        scenario_snapshot_csv,
+        scenario_summary_rows,
+        [
+            "scenario",
+            "n_runs",
+            "completion_rate_pct",
+            "file_present_rate_pct",
+            "chunk_to_chunk_time_mean_s",
+            "chunk_to_chunk_time_std_s",
+            "chunk_to_chunk_time_min_s",
+            "chunk_to_chunk_time_max_s",
+            "chunk_to_chunk_time_ci95_s",
+            "file_to_file_time_mean_s",
+            "file_to_file_time_std_s",
+            "file_to_file_time_min_s",
+            "file_to_file_time_max_s",
+            "file_to_file_time_ci95_s",
+            "goodput_mean_mbps",
+            "goodput_std_mbps",
+            "goodput_min_mbps",
+            "goodput_max_mbps",
+            "goodput_ci95_mbps",
+        ],
+    )
+
+    store_scenario_statistics(report_id, scenario_summary_rows)
 
     write_csv(
         iface_csv,
@@ -308,12 +422,14 @@ def main() -> None:
         scenario_summary_rows=scenario_summary_rows,
         per_run_csv=per_run_csv,
         scenario_csv=scenario_csv,
+        scenario_snapshot_csv=scenario_snapshot_csv,
         iface_csv=iface_csv,
     )
 
     print("Receiver statistical report generated:")
     print(f" - {per_run_csv}")
     print(f" - {scenario_csv}")
+    print(f" - {scenario_snapshot_csv}")
     print(f" - {iface_csv}")
     print(f" - {summary_md}")
 
