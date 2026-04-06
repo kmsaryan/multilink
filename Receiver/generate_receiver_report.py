@@ -4,6 +4,7 @@ import pandas as pd
 import os
 import matplotlib.pyplot as plt
 import config
+from db_utils import get_db_connection
 
 DB_PATH = config.DB_PATH
 RESULTS_DIR = config.RESULTS_DIR
@@ -15,7 +16,7 @@ def generate_report():
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection(DB_PATH)
     
     # 1. Get the latest file info
     file_info = conn.execute("""

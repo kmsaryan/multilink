@@ -6,12 +6,14 @@ import math
 import os
 import sqlite3
 import statistics
+import time
 from datetime import datetime
 from collections import defaultdict
 from typing import Dict, List, Optional
 
 import config
 from db_utils import (
+    get_db_connection,
     init_receiver_db,
     infer_scenario_from_filename,
     store_run_statistics,
@@ -28,6 +30,10 @@ def safe_mean(values: List[float]) -> Optional[float]:
 
 def safe_stdev(values: List[float]) -> Optional[float]:
     return statistics.stdev(values) if len(values) >= 2 else None
+
+
+def safe_variance(values: List[float]) -> Optional[float]:
+    return statistics.variance(values) if len(values) >= 2 else None
 
 
 def ci95_half_width(values: List[float]) -> Optional[float]:
@@ -176,29 +182,34 @@ def build_markdown_summary(
         handle.write("\n".join(lines) + "\n")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate receiver-only multi-run statistical report from receiver DB.")
-    parser.add_argument("scenario_name", nargs="?", default=None, help="Optional scenario label to apply to all runs (e.g., LOS, NLOS, SCENARIO_A). If omitted, scenario is inferred from filename.")
-    parser.add_argument("--receiver-db", default=config.DB_PATH, help="Path to receiver SQLite DB.")
-    parser.add_argument("--received-dir", default=config.RECEIVED_DIR, help="Path to receiver reassembled files directory.")
-    parser.add_argument("--out-dir", default=DEFAULT_OUTPUT_DIR, help="Output directory for CSV/MD summary.")
-    parser.add_argument("--report-id", default=None, help="Optional identifier suffix for output files (default: timestamp).")
-    args = parser.parse_args()
+def is_transfer_complete(row: sqlite3.Row) -> bool:
+    total_chunks = int(row["total_chunks"] or 0)
+    received_chunks = int(row["received_chunks"] or 0)
+    status = row["status"] or ""
+    completion_time = row["completion_time"]
+    return bool(
+        status == "completed"
+        or (completion_time is not None)
+        or (total_chunks > 0 and received_chunks >= total_chunks)
+    )
 
-    if not os.path.exists(args.receiver_db):
-        raise SystemExit(f"Receiver DB not found: {args.receiver_db}")
 
-    os.makedirs(args.out_dir, exist_ok=True)
-    init_receiver_db()
+def completed_signature(rows: List[sqlite3.Row]) -> tuple:
+    return tuple(
+        sorted(
+            (
+                str(row["payload_id"]),
+                int(row["total_chunks"] or 0),
+                int(row["received_chunks"] or 0),
+                row["completion_time"],
+            )
+            for row in rows
+        )
+    )
 
-    report_id = args.report_id or datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    conn = sqlite3.connect(args.receiver_db)
-    payload_rows = fetch_payload_rows(conn)
-
-    if not payload_rows:
-        conn.close()
-        raise SystemExit("No payload runs found in receiver DB (file_map is empty).")
+def generate_reports_for_rows(args, payload_rows: List[sqlite3.Row], report_id: str) -> None:
+    conn = get_db_connection(args.receiver_db)
 
     per_run_rows: List[Dict[str, object]] = []
     iface_rows: List[Dict[str, object]] = []
@@ -296,6 +307,7 @@ def main() -> None:
 
     scenario_summary_rows: List[Dict[str, object]] = []
     for scenario, runs in sorted(by_scenario.items()):
+        sample_count = len(runs)
         completion_vals = [float(run["completed"]) for run in runs]
         file_present_vals = [float(run["file_present"]) for run in runs]
         chunk_to_chunk_vals = [float(run["chunk_to_chunk_time_s"]) for run in runs if run["chunk_to_chunk_time_s"] is not None]
@@ -305,20 +317,24 @@ def main() -> None:
         scenario_summary_rows.append(
             {
                 "scenario": scenario,
-                "n_runs": len(runs),
+                "n_runs": sample_count,
+                "sample_count": sample_count,
                 "completion_rate_pct": safe_mean(completion_vals) * 100 if completion_vals else 0.0,
                 "file_present_rate_pct": safe_mean(file_present_vals) * 100 if file_present_vals else 0.0,
                 "chunk_to_chunk_time_mean_s": safe_mean(chunk_to_chunk_vals),
+                "chunk_to_chunk_time_variance_s": safe_variance(chunk_to_chunk_vals),
                 "chunk_to_chunk_time_std_s": safe_stdev(chunk_to_chunk_vals),
                 "chunk_to_chunk_time_min_s": min(chunk_to_chunk_vals) if chunk_to_chunk_vals else None,
                 "chunk_to_chunk_time_max_s": max(chunk_to_chunk_vals) if chunk_to_chunk_vals else None,
                 "chunk_to_chunk_time_ci95_s": ci95_half_width(chunk_to_chunk_vals),
                 "file_to_file_time_mean_s": safe_mean(file_to_file_vals),
+                "file_to_file_time_variance_s": safe_variance(file_to_file_vals),
                 "file_to_file_time_std_s": safe_stdev(file_to_file_vals),
                 "file_to_file_time_min_s": min(file_to_file_vals) if file_to_file_vals else None,
                 "file_to_file_time_max_s": max(file_to_file_vals) if file_to_file_vals else None,
                 "file_to_file_time_ci95_s": ci95_half_width(file_to_file_vals),
                 "goodput_mean_mbps": safe_mean(goodput_vals),
+                "goodput_variance_mbps": safe_variance(goodput_vals),
                 "goodput_std_mbps": safe_stdev(goodput_vals),
                 "goodput_min_mbps": min(goodput_vals) if goodput_vals else None,
                 "goodput_max_mbps": max(goodput_vals) if goodput_vals else None,
@@ -362,19 +378,23 @@ def main() -> None:
         [
             "scenario",
             "n_runs",
+            "sample_count",
             "completion_rate_pct",
             "file_present_rate_pct",
             "chunk_to_chunk_time_mean_s",
+            "chunk_to_chunk_time_variance_s",
             "chunk_to_chunk_time_std_s",
             "chunk_to_chunk_time_min_s",
             "chunk_to_chunk_time_max_s",
             "chunk_to_chunk_time_ci95_s",
             "file_to_file_time_mean_s",
+            "file_to_file_time_variance_s",
             "file_to_file_time_std_s",
             "file_to_file_time_min_s",
             "file_to_file_time_max_s",
             "file_to_file_time_ci95_s",
             "goodput_mean_mbps",
+            "goodput_variance_mbps",
             "goodput_std_mbps",
             "goodput_min_mbps",
             "goodput_max_mbps",
@@ -388,19 +408,23 @@ def main() -> None:
         [
             "scenario",
             "n_runs",
+            "sample_count",
             "completion_rate_pct",
             "file_present_rate_pct",
             "chunk_to_chunk_time_mean_s",
+            "chunk_to_chunk_time_variance_s",
             "chunk_to_chunk_time_std_s",
             "chunk_to_chunk_time_min_s",
             "chunk_to_chunk_time_max_s",
             "chunk_to_chunk_time_ci95_s",
             "file_to_file_time_mean_s",
+            "file_to_file_time_variance_s",
             "file_to_file_time_std_s",
             "file_to_file_time_min_s",
             "file_to_file_time_max_s",
             "file_to_file_time_ci95_s",
             "goodput_mean_mbps",
+            "goodput_variance_mbps",
             "goodput_std_mbps",
             "goodput_min_mbps",
             "goodput_max_mbps",
@@ -432,6 +456,64 @@ def main() -> None:
     print(f" - {scenario_snapshot_csv}")
     print(f" - {iface_csv}")
     print(f" - {summary_md}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate receiver-only multi-run statistical report from receiver DB.")
+    parser.add_argument("scenario_name", nargs="?", default=None, help="Optional scenario label to apply to all runs (e.g., LOS, NLOS, SCENARIO_A). If omitted, scenario is inferred from filename.")
+    parser.add_argument("--receiver-db", default=config.DB_PATH, help="Path to receiver SQLite DB.")
+    parser.add_argument("--received-dir", default=config.RECEIVED_DIR, help="Path to receiver reassembled files directory.")
+    parser.add_argument("--out-dir", default=DEFAULT_OUTPUT_DIR, help="Output directory for CSV/MD summary.")
+    parser.add_argument("--report-id", default=None, help="Optional identifier suffix for output files (default: timestamp).")
+    parser.add_argument("--watch", action="store_true", help="Keep running and generate a new report when new completed transfers arrive.")
+    parser.add_argument("--poll-interval", type=float, default=5.0, help="Polling interval in seconds when --watch is enabled.")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.receiver_db):
+        raise SystemExit(f"Receiver DB not found: {args.receiver_db}")
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    init_receiver_db()
+
+    if not args.watch:
+        conn = get_db_connection(args.receiver_db)
+        payload_rows = fetch_payload_rows(conn)
+        conn.close()
+
+        if not payload_rows:
+            raise SystemExit("No payload runs found in receiver DB (file_map is empty).")
+
+        report_id = args.report_id or datetime.now().strftime("%Y%m%d_%H%M%S")
+        generate_reports_for_rows(args, payload_rows, report_id)
+        return
+
+    poll_interval = max(0.5, float(args.poll_interval))
+    print(f"Watching receiver DB for completed transfers (poll every {poll_interval:.1f}s)...")
+    last_seen_signature = None
+
+    try:
+        while True:
+            conn = get_db_connection(args.receiver_db)
+            payload_rows = fetch_payload_rows(conn)
+            conn.close()
+
+            completed_rows = [row for row in payload_rows if is_transfer_complete(row)]
+            if not completed_rows:
+                print("No completed transfers yet; waiting...")
+                time.sleep(poll_interval)
+                continue
+
+            current_signature = completed_signature(completed_rows)
+            if current_signature != last_seen_signature:
+                report_id = args.report_id or datetime.now().strftime("%Y%m%d_%H%M%S")
+                generate_reports_for_rows(args, completed_rows, report_id)
+                last_seen_signature = current_signature
+            else:
+                print("No new completed transfer changes; waiting...")
+
+            time.sleep(poll_interval)
+    except KeyboardInterrupt:
+        print("\nStopped watch mode.")
 
 
 if __name__ == "__main__":

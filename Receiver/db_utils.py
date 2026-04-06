@@ -3,11 +3,41 @@ import os
 import time
 import config   
 DB_PATH = config.DB_PATH
+SQLITE_TIMEOUT_SECONDS = 30
+
+
+def get_db_connection(db_path=None, timeout=SQLITE_TIMEOUT_SECONDS):
+    """Create a SQLite connection configured for better concurrent access."""
+    target_path = db_path or DB_PATH
+    db_dir = os.path.dirname(target_path)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+
+    conn = sqlite3.connect(target_path, timeout=timeout)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute(f"PRAGMA busy_timeout={int(timeout * 1000)};")
+    return conn
+
+
+def ensure_wal_mode(db_path=None):
+    """Ensure database is initialized in WAL mode."""
+    conn = get_db_connection(db_path=db_path)
+    conn.close()
+
+
+def _ensure_column(conn, table_name, column_def):
+    """Add a missing column to an existing table without disturbing old rows."""
+    column_name = column_def.split()[0]
+    existing_columns = {
+        row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    if column_name not in existing_columns:
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_def}")
 
 def init_receiver_db():
     """Initializes the receiver database schema."""
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     # Table to map UUIDs to real filenames
     cur.execute("""
@@ -63,23 +93,39 @@ def init_receiver_db():
             report_id TEXT,
             scenario TEXT,
             n_runs INT,
+            sample_count INT,
             completion_rate_pct REAL,
             file_present_rate_pct REAL,
             chunk_to_chunk_time_mean_s REAL,
+            chunk_to_chunk_time_variance_s REAL,
             chunk_to_chunk_time_std_s REAL,
             chunk_to_chunk_time_min_s REAL,
             chunk_to_chunk_time_max_s REAL,
+            chunk_to_chunk_time_ci95_s REAL,
             file_to_file_time_mean_s REAL,
+            file_to_file_time_variance_s REAL,
             file_to_file_time_std_s REAL,
             file_to_file_time_min_s REAL,
             file_to_file_time_max_s REAL,
+            file_to_file_time_ci95_s REAL,
             goodput_mean_mbps REAL,
+            goodput_variance_mbps REAL,
             goodput_std_mbps REAL,
             goodput_min_mbps REAL,
             goodput_max_mbps REAL,
+            goodput_ci95_mbps REAL,
             created_at REAL
         )
     """)
+
+    # Make sure existing databases pick up newly added statistical columns.
+    _ensure_column(conn, "scenario_statistics", "sample_count INT")
+    _ensure_column(conn, "scenario_statistics", "chunk_to_chunk_time_variance_s REAL")
+    _ensure_column(conn, "scenario_statistics", "chunk_to_chunk_time_ci95_s REAL")
+    _ensure_column(conn, "scenario_statistics", "file_to_file_time_variance_s REAL")
+    _ensure_column(conn, "scenario_statistics", "file_to_file_time_ci95_s REAL")
+    _ensure_column(conn, "scenario_statistics", "goodput_variance_mbps REAL")
+    _ensure_column(conn, "scenario_statistics", "goodput_ci95_mbps REAL")
     conn.commit()
     conn.close()
 
@@ -87,24 +133,24 @@ def init_receiver_db():
 def infer_scenario_from_filename(filename):
     """Infers a scenario label from the payload filename."""
     lowered = (filename or "").lower()
-    if "los_link_failure" in lowered:
-        return "LOS_LINK_FAILURE"
-    if "nlos_link_failure" in lowered:
-        return "NLOS_LINK_FAILURE"
-    if "los" in lowered and "nlos" not in lowered:
-        return "LOS"
+    is_link_failure = "link_failure" in lowered or ("link" in lowered and "failure" in lowered)
+
+    if "nlos" in lowered and is_link_failure:
+        return "nlos_link_failure"
+    if "los" in lowered and is_link_failure:
+        return "los_link_failure"
     if "nlos" in lowered:
-        return "NLOS"
-    if "link_failure" in lowered:
-        return "LINK_FAILURE"
-    return "UNKNOWN"
+        return "nlos"
+    if "los" in lowered:
+        return "los"
+    return "unknown"
 
 def register_metadata(pid, filename, total_chunks):
     """
     Saves the original filename and total chunks for a payload.
     This is triggered by Type 4 packets.
     """
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute("""
@@ -123,7 +169,7 @@ def register_metadata(pid, filename, total_chunks):
 
 def register_arrival(pid, idx, ip, size):
     """Logs the arrival of a specific data chunk."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     try:
         # Log the timestamped arrival
@@ -150,7 +196,7 @@ def register_arrival(pid, idx, ip, size):
 
 def mark_transfer_complete(pid):
     """Records completion timestamp when all chunks are received."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute("""
@@ -185,7 +231,7 @@ def store_run_statistics(
     file_present,
 ):
     """Upserts one persistent per-run row in run_statistics."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     try:
         cur.execute(
@@ -246,42 +292,55 @@ def store_run_statistics(
 
 def store_scenario_statistics(report_id, rows):
     """Appends scenario-level snapshots into scenario_statistics."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
     try:
         for row in rows:
             cur.execute(
                 """
                 INSERT INTO scenario_statistics (
-                    report_id, scenario, n_runs,
+                    report_id, scenario, n_runs, sample_count,
                     completion_rate_pct, file_present_rate_pct,
                     chunk_to_chunk_time_mean_s, chunk_to_chunk_time_std_s,
+                    chunk_to_chunk_time_variance_s,
                     chunk_to_chunk_time_min_s, chunk_to_chunk_time_max_s,
+                    chunk_to_chunk_time_ci95_s,
                     file_to_file_time_mean_s, file_to_file_time_std_s,
+                    file_to_file_time_variance_s,
                     file_to_file_time_min_s, file_to_file_time_max_s,
+                    file_to_file_time_ci95_s,
                     goodput_mean_mbps, goodput_std_mbps,
+                    goodput_variance_mbps,
                     goodput_min_mbps, goodput_max_mbps,
+                    goodput_ci95_mbps,
                     created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     report_id,
                     row.get("scenario"),
                     row.get("n_runs"),
+                    row.get("sample_count", row.get("n_runs")),
                     row.get("completion_rate_pct"),
                     row.get("file_present_rate_pct"),
                     row.get("chunk_to_chunk_time_mean_s"),
                     row.get("chunk_to_chunk_time_std_s"),
+                    row.get("chunk_to_chunk_time_variance_s"),
                     row.get("chunk_to_chunk_time_min_s"),
                     row.get("chunk_to_chunk_time_max_s"),
+                    row.get("chunk_to_chunk_time_ci95_s"),
                     row.get("file_to_file_time_mean_s"),
                     row.get("file_to_file_time_std_s"),
+                    row.get("file_to_file_time_variance_s"),
                     row.get("file_to_file_time_min_s"),
                     row.get("file_to_file_time_max_s"),
+                    row.get("file_to_file_time_ci95_s"),
                     row.get("goodput_mean_mbps"),
                     row.get("goodput_std_mbps"),
+                    row.get("goodput_variance_mbps"),
                     row.get("goodput_min_mbps"),
                     row.get("goodput_max_mbps"),
+                    row.get("goodput_ci95_mbps"),
                     time.time(),
                 ),
             )
@@ -290,3 +349,64 @@ def store_scenario_statistics(report_id, rows):
         print(f"DB Error in store_scenario_statistics: {e}")
     finally:
         conn.close()
+
+
+def fetch_scenario_statistics_history(db_path=None, scenario=None):
+    conn = get_db_connection(db_path=db_path)
+    cur = conn.cursor()
+
+    base_query = """
+        SELECT
+            scenario,
+            n_runs,
+            COUNT(*)                                    AS report_count,
+            AVG(chunk_to_chunk_time_mean_s)             AS ctc_mean,
+            AVG(chunk_to_chunk_time_variance_s)         AS ctc_variance,
+            AVG(chunk_to_chunk_time_std_s)              AS ctc_std,
+            AVG(chunk_to_chunk_time_ci95_s)             AS ctc_ci95,
+            AVG(file_to_file_time_mean_s)               AS ftf_mean,
+            AVG(file_to_file_time_variance_s)           AS ftf_variance,
+            AVG(file_to_file_time_std_s)                AS ftf_std,
+            AVG(file_to_file_time_ci95_s)               AS ftf_ci95,
+            AVG(goodput_mean_mbps)                      AS gp_mean,
+            AVG(goodput_variance_mbps)                  AS gp_variance,
+            AVG(goodput_std_mbps)                       AS gp_std,
+            AVG(goodput_ci95_mbps)                      AS gp_ci95,
+            AVG(completion_rate_pct)                    AS completion_rate,
+            AVG(file_present_rate_pct)                  AS file_present_rate
+        FROM scenario_statistics
+        WHERE chunk_to_chunk_time_mean_s IS NOT NULL
+    """
+
+    if scenario:
+        base_query += " AND scenario = ?"
+        base_query += " GROUP BY scenario, n_runs ORDER BY scenario ASC, n_runs ASC"
+        rows = cur.execute(base_query, (scenario,)).fetchall()
+    else:
+        base_query += " GROUP BY scenario, n_runs ORDER BY scenario ASC, n_runs ASC"
+        rows = cur.execute(base_query).fetchall()
+
+    conn.close()
+
+    return [
+        {
+            "scenario": row[0],
+            "n_runs": int(row[1]),
+            "report_count": int(row[2]),
+            "ctc_mean": row[3],
+            "ctc_variance": row[4],
+            "ctc_std": row[5],
+            "ctc_ci95": row[6],
+            "ftf_mean": row[7],
+            "ftf_variance": row[8],
+            "ftf_std": row[9],
+            "ftf_ci95": row[10],
+            "gp_mean": row[11],
+            "gp_variance": row[12],
+            "gp_std": row[13],
+            "gp_ci95": row[14],
+            "completion_rate": row[15],
+            "file_present_rate": row[16],
+        }
+        for row in rows
+    ]
