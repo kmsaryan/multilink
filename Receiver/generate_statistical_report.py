@@ -6,14 +6,17 @@ import math
 import os
 import sqlite3
 import statistics
+import time
 from datetime import datetime
 from collections import defaultdict
 from typing import Dict, List, Optional
 
 import config
 from db_utils import (
+    get_db_connection,
     init_receiver_db,
     infer_scenario_from_filename,
+    store_receiver_checkpoint_statistics,
     store_run_statistics,
     store_scenario_statistics,
 )
@@ -28,6 +31,10 @@ def safe_mean(values: List[float]) -> Optional[float]:
 
 def safe_stdev(values: List[float]) -> Optional[float]:
     return statistics.stdev(values) if len(values) >= 2 else None
+
+
+def safe_variance(values: List[float]) -> Optional[float]:
+    return statistics.variance(values) if len(values) >= 2 else None
 
 
 def ci95_half_width(values: List[float]) -> Optional[float]:
@@ -128,6 +135,7 @@ def build_markdown_summary(
     per_run_csv: str,
     scenario_csv: str,
     scenario_snapshot_csv: str,
+    checkpoint_csv: str,
     iface_csv: str,
 ) -> None:
     lines = []
@@ -137,6 +145,7 @@ def build_markdown_summary(
     lines.append(f"- Per-run metrics: `{per_run_csv}`")
     lines.append(f"- Scenario summary: `{scenario_csv}`")
     lines.append(f"- Scenario snapshot: `{scenario_snapshot_csv}`")
+    lines.append(f"- Checkpoint snapshot: `{checkpoint_csv}`")
     lines.append(f"- Interface contribution summary: `{iface_csv}`")
     lines.append("")
     lines.append("## Scenario Summary")
@@ -176,29 +185,79 @@ def build_markdown_summary(
         handle.write("\n".join(lines) + "\n")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate receiver-only multi-run statistical report from receiver DB.")
-    parser.add_argument("scenario_name", nargs="?", default=None, help="Optional scenario label to apply to all runs (e.g., LOS, NLOS, SCENARIO_A). If omitted, scenario is inferred from filename.")
-    parser.add_argument("--receiver-db", default=config.DB_PATH, help="Path to receiver SQLite DB.")
-    parser.add_argument("--received-dir", default=config.RECEIVED_DIR, help="Path to receiver reassembled files directory.")
-    parser.add_argument("--out-dir", default=DEFAULT_OUTPUT_DIR, help="Output directory for CSV/MD summary.")
-    parser.add_argument("--report-id", default=None, help="Optional identifier suffix for output files (default: timestamp).")
-    args = parser.parse_args()
+def is_transfer_complete(row: sqlite3.Row) -> bool:
+    total_chunks = int(row["total_chunks"] or 0)
+    received_chunks = int(row["received_chunks"] or 0)
+    status = row["status"] or ""
+    completion_time = row["completion_time"]
+    return bool(
+        status == "completed"
+        or (completion_time is not None)
+        or (total_chunks > 0 and received_chunks >= total_chunks)
+    )
 
-    if not os.path.exists(args.receiver_db):
-        raise SystemExit(f"Receiver DB not found: {args.receiver_db}")
 
-    os.makedirs(args.out_dir, exist_ok=True)
-    init_receiver_db()
+def completed_signature(rows: List[sqlite3.Row]) -> tuple:
+    return tuple(
+        sorted(
+            (
+                str(row["payload_id"]),
+                int(row["total_chunks"] or 0),
+                int(row["received_chunks"] or 0),
+                row["completion_time"],
+            )
+            for row in rows
+        )
+    )
 
-    report_id = args.report_id or datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    conn = sqlite3.connect(args.receiver_db)
-    payload_rows = fetch_payload_rows(conn)
+def build_receiver_checkpoint_rows(per_run_rows, checkpoint_step=2, max_files=50):
+    """
+    Computes checkpoint statistics at file-count intervals within a single report run.
+    Returns rows suitable for storage/CSV export.
+    """
+    metrics = [
+        ("chunk_to_chunk_time_s", "chunk_to_chunk"),
+        ("file_to_file_time_s", "file_to_file"),
+        ("goodput_mbps", "goodput"),
+    ]
 
-    if not payload_rows:
-        conn.close()
-        raise SystemExit("No payload runs found in receiver DB (file_map is empty).")
+    sorted_rows = sorted(
+        per_run_rows,
+        key=lambda r: r.get("metadata_arrived_time") or 0,
+    )
+
+    n_total = len(sorted_rows)
+    checkpoints = list(range(checkpoint_step, min(n_total, max_files) + 1, checkpoint_step))
+    if n_total not in checkpoints and n_total <= max_files:
+        checkpoints.append(n_total)
+
+    output = []
+    for n in sorted(set(checkpoints)):
+        subset = sorted_rows[:n]
+        for metric_key, metric_label in metrics:
+            values = [float(r[metric_key]) for r in subset if r.get(metric_key) is not None]
+            mean_val = safe_mean(values)
+            var_val = safe_variance(values)
+            std_val = safe_stdev(values)
+            ci_val = ci95_half_width(values)
+            output.append(
+                {
+                    "file_count": n,
+                    "metric": metric_label,
+                    "sample_count": len(values),
+                    "mean": mean_val,
+                    "variance": var_val,
+                    "std": std_val,
+                    "ci95": ci_val,
+                }
+            )
+
+    return output
+
+
+def generate_reports_for_rows(args, payload_rows: List[sqlite3.Row], report_id: str) -> None:
+    conn = get_db_connection(args.receiver_db)
 
     per_run_rows: List[Dict[str, object]] = []
     iface_rows: List[Dict[str, object]] = []
@@ -288,6 +347,27 @@ def main() -> None:
                 }
             )
 
+    checkpoint_rows = []
+    grouped_by_scenario = defaultdict(list)
+    for run in per_run_rows:
+        grouped_by_scenario[str(run["scenario"])].append(run)
+
+    for scenario_name, scenario_rows in grouped_by_scenario.items():
+        scenario_checkpoint_rows = build_receiver_checkpoint_rows(
+            scenario_rows,
+            checkpoint_step=2,
+            max_files=50,
+        )
+        for row in scenario_checkpoint_rows:
+            row["scenario"] = scenario_name
+        checkpoint_rows.extend(scenario_checkpoint_rows)
+        store_receiver_checkpoint_statistics(
+            db_path=args.receiver_db,
+            report_id=report_id,
+            scenario=scenario_name,
+            rows=scenario_checkpoint_rows,
+        )
+
     conn.close()
 
     by_scenario: Dict[str, List[Dict[str, object]]] = defaultdict(list)
@@ -296,6 +376,7 @@ def main() -> None:
 
     scenario_summary_rows: List[Dict[str, object]] = []
     for scenario, runs in sorted(by_scenario.items()):
+        sample_count = len(runs)
         completion_vals = [float(run["completed"]) for run in runs]
         file_present_vals = [float(run["file_present"]) for run in runs]
         chunk_to_chunk_vals = [float(run["chunk_to_chunk_time_s"]) for run in runs if run["chunk_to_chunk_time_s"] is not None]
@@ -305,20 +386,24 @@ def main() -> None:
         scenario_summary_rows.append(
             {
                 "scenario": scenario,
-                "n_runs": len(runs),
+                "n_runs": sample_count,
+                "sample_count": sample_count,
                 "completion_rate_pct": safe_mean(completion_vals) * 100 if completion_vals else 0.0,
                 "file_present_rate_pct": safe_mean(file_present_vals) * 100 if file_present_vals else 0.0,
                 "chunk_to_chunk_time_mean_s": safe_mean(chunk_to_chunk_vals),
+                "chunk_to_chunk_time_variance_s": safe_variance(chunk_to_chunk_vals),
                 "chunk_to_chunk_time_std_s": safe_stdev(chunk_to_chunk_vals),
                 "chunk_to_chunk_time_min_s": min(chunk_to_chunk_vals) if chunk_to_chunk_vals else None,
                 "chunk_to_chunk_time_max_s": max(chunk_to_chunk_vals) if chunk_to_chunk_vals else None,
                 "chunk_to_chunk_time_ci95_s": ci95_half_width(chunk_to_chunk_vals),
                 "file_to_file_time_mean_s": safe_mean(file_to_file_vals),
+                "file_to_file_time_variance_s": safe_variance(file_to_file_vals),
                 "file_to_file_time_std_s": safe_stdev(file_to_file_vals),
                 "file_to_file_time_min_s": min(file_to_file_vals) if file_to_file_vals else None,
                 "file_to_file_time_max_s": max(file_to_file_vals) if file_to_file_vals else None,
                 "file_to_file_time_ci95_s": ci95_half_width(file_to_file_vals),
                 "goodput_mean_mbps": safe_mean(goodput_vals),
+                "goodput_variance_mbps": safe_variance(goodput_vals),
                 "goodput_std_mbps": safe_stdev(goodput_vals),
                 "goodput_min_mbps": min(goodput_vals) if goodput_vals else None,
                 "goodput_max_mbps": max(goodput_vals) if goodput_vals else None,
@@ -329,6 +414,7 @@ def main() -> None:
     per_run_csv = os.path.join(args.out_dir, f"per_run_metrics_{report_id}.csv")
     scenario_csv = os.path.join(args.out_dir, f"scenario_summary_{report_id}.csv")
     scenario_snapshot_csv = os.path.join(args.out_dir, f"scenario_statistics_snapshot_{report_id}.csv")
+    checkpoint_csv = os.path.join(args.out_dir, f"receiver_checkpoint_statistics_{report_id}.csv")
     iface_csv = os.path.join(args.out_dir, f"interface_contribution_{report_id}.csv")
     summary_md = os.path.join(args.out_dir, f"statistical_summary_{report_id}.md")
 
@@ -362,19 +448,23 @@ def main() -> None:
         [
             "scenario",
             "n_runs",
+            "sample_count",
             "completion_rate_pct",
             "file_present_rate_pct",
             "chunk_to_chunk_time_mean_s",
+            "chunk_to_chunk_time_variance_s",
             "chunk_to_chunk_time_std_s",
             "chunk_to_chunk_time_min_s",
             "chunk_to_chunk_time_max_s",
             "chunk_to_chunk_time_ci95_s",
             "file_to_file_time_mean_s",
+            "file_to_file_time_variance_s",
             "file_to_file_time_std_s",
             "file_to_file_time_min_s",
             "file_to_file_time_max_s",
             "file_to_file_time_ci95_s",
             "goodput_mean_mbps",
+            "goodput_variance_mbps",
             "goodput_std_mbps",
             "goodput_min_mbps",
             "goodput_max_mbps",
@@ -388,24 +478,34 @@ def main() -> None:
         [
             "scenario",
             "n_runs",
+            "sample_count",
             "completion_rate_pct",
             "file_present_rate_pct",
             "chunk_to_chunk_time_mean_s",
+            "chunk_to_chunk_time_variance_s",
             "chunk_to_chunk_time_std_s",
             "chunk_to_chunk_time_min_s",
             "chunk_to_chunk_time_max_s",
             "chunk_to_chunk_time_ci95_s",
             "file_to_file_time_mean_s",
+            "file_to_file_time_variance_s",
             "file_to_file_time_std_s",
             "file_to_file_time_min_s",
             "file_to_file_time_max_s",
             "file_to_file_time_ci95_s",
             "goodput_mean_mbps",
+            "goodput_variance_mbps",
             "goodput_std_mbps",
             "goodput_min_mbps",
             "goodput_max_mbps",
             "goodput_ci95_mbps",
         ],
+    )
+
+    write_csv(
+        checkpoint_csv,
+        checkpoint_rows,
+        ["scenario", "file_count", "metric", "sample_count", "mean", "variance", "std", "ci95"],
     )
 
     store_scenario_statistics(report_id, scenario_summary_rows)
@@ -423,6 +523,7 @@ def main() -> None:
         per_run_csv=per_run_csv,
         scenario_csv=scenario_csv,
         scenario_snapshot_csv=scenario_snapshot_csv,
+        checkpoint_csv=checkpoint_csv,
         iface_csv=iface_csv,
     )
 
@@ -430,8 +531,67 @@ def main() -> None:
     print(f" - {per_run_csv}")
     print(f" - {scenario_csv}")
     print(f" - {scenario_snapshot_csv}")
+    print(f" - {checkpoint_csv}")
     print(f" - {iface_csv}")
     print(f" - {summary_md}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate receiver-only multi-run statistical report from receiver DB.")
+    parser.add_argument("scenario_name", nargs="?", default=None, help="Optional scenario label to apply to all runs (e.g., LOS, NLOS, SCENARIO_A). If omitted, scenario is inferred from filename.")
+    parser.add_argument("--receiver-db", default=config.DB_PATH, help="Path to receiver SQLite DB.")
+    parser.add_argument("--received-dir", default=config.RECEIVED_DIR, help="Path to receiver reassembled files directory.")
+    parser.add_argument("--out-dir", default=DEFAULT_OUTPUT_DIR, help="Output directory for CSV/MD summary.")
+    parser.add_argument("--report-id", default=None, help="Optional identifier suffix for output files (default: timestamp).")
+    parser.add_argument("--watch", action="store_true", help="Keep running and generate a new report when new completed transfers arrive.")
+    parser.add_argument("--poll-interval", type=float, default=5.0, help="Polling interval in seconds when --watch is enabled.")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.receiver_db):
+        raise SystemExit(f"Receiver DB not found: {args.receiver_db}")
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    init_receiver_db()
+
+    if not args.watch:
+        conn = get_db_connection(args.receiver_db)
+        payload_rows = fetch_payload_rows(conn)
+        conn.close()
+
+        if not payload_rows:
+            raise SystemExit("No payload runs found in receiver DB (file_map is empty).")
+
+        report_id = args.report_id or datetime.now().strftime("%Y%m%d_%H%M%S")
+        generate_reports_for_rows(args, payload_rows, report_id)
+        return
+
+    poll_interval = max(0.5, float(args.poll_interval))
+    print(f"Watching receiver DB for completed transfers (poll every {poll_interval:.1f}s)...")
+    last_seen_signature = None
+
+    try:
+        while True:
+            conn = get_db_connection(args.receiver_db)
+            payload_rows = fetch_payload_rows(conn)
+            conn.close()
+
+            completed_rows = [row for row in payload_rows if is_transfer_complete(row)]
+            if not completed_rows:
+                print("No completed transfers yet; waiting...")
+                time.sleep(poll_interval)
+                continue
+
+            current_signature = completed_signature(completed_rows)
+            if current_signature != last_seen_signature:
+                report_id = args.report_id or datetime.now().strftime("%Y%m%d_%H%M%S")
+                generate_reports_for_rows(args, completed_rows, report_id)
+                last_seen_signature = current_signature
+            else:
+                print("No new completed transfer changes; waiting...")
+
+            time.sleep(poll_interval)
+    except KeyboardInterrupt:
+        print("\nStopped watch mode.")
 
 
 if __name__ == "__main__":

@@ -5,12 +5,13 @@ import uuid
 import os
 import select
 from config import CHUNK_SIZE, RECEIVED_DIR, DATA_PORT, HEALTH_PORT, DB_PATH
-from db_utils import register_metadata, register_arrival, init_receiver_db, mark_transfer_complete
+from db_utils import register_metadata, register_arrival, init_receiver_db, mark_transfer_complete, ensure_wal_mode
 
 def run_receiver():
     db_dir = os.path.dirname(DB_PATH)
     if db_dir and not os.path.exists(db_dir):
         os.makedirs(db_dir, exist_ok=True)
+    ensure_wal_mode(DB_PATH)
     init_receiver_db()
 
     sockets = []
