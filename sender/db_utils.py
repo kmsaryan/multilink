@@ -121,6 +121,22 @@ def init_sender_db(db_path):
             created_at REAL
         )
     """)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS checkpoint_statistics_history (
+            checkpoint_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_run_id TEXT,
+            scenario TEXT,
+            metric_column TEXT,
+            file_count INT,
+            sample_count INT,
+            mean_value REAL,
+            variance_value REAL,
+            std_value REAL,
+            created_at REAL
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -214,6 +230,90 @@ def store_scenario_statistics(db_path, scenario, transfer_times, source_payload_
     )
     conn.commit()
     conn.close()
+
+
+def store_checkpoint_statistics(
+    db_path,
+    report_run_id,
+    scenario,
+    metric_column,
+    file_count,
+    sample_count,
+    mean_value,
+    variance_value,
+    std_value,
+):
+    """Append one checkpoint-level statistical snapshot row."""
+    conn = get_conn(db_path)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO checkpoint_statistics_history (
+            report_run_id,
+            scenario,
+            metric_column,
+            file_count,
+            sample_count,
+            mean_value,
+            variance_value,
+            std_value,
+            created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            report_run_id,
+            scenario,
+            metric_column,
+            file_count,
+            sample_count,
+            mean_value,
+            variance_value,
+            std_value,
+            time.time(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def fetch_checkpoint_history(db_path, metric_column="send_span_s"):
+    """
+    Fetch all stored checkpoint rows for a given metric, grouped by file_count.
+
+    Returns a list of dicts with file_count, mean_value, variance_value,
+    std_value, and n_reports.
+    """
+    conn = get_conn(db_path)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            file_count,
+            AVG(mean_value)     AS mean_value,
+            AVG(variance_value) AS variance_value,
+            AVG(std_value)      AS std_value,
+            COUNT(*)            AS n_reports
+        FROM checkpoint_statistics_history
+        WHERE metric_column = ?
+          AND mean_value IS NOT NULL
+          AND variance_value IS NOT NULL
+        GROUP BY file_count
+        ORDER BY file_count ASC
+        """,
+        (metric_column,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return [
+        {
+            "file_count": int(row[0]),
+            "mean_value": float(row[1]),
+            "variance_value": float(row[2]),
+            "std_value": float(row[3]) if row[3] is not None else None,
+            "n_reports": int(row[4]),
+        }
+        for row in rows
+    ]
 
 def mark_acked(db_path, payload_id, idx):
     """Mark chunk as acknowledged"""
