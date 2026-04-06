@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 import argparse
-import csv
 import math
 import os
 import re
 import sqlite3
 import statistics
+import sys
 import time
 import uuid
+from datetime import datetime
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import config
@@ -18,10 +19,6 @@ from db_utils import (
     store_run_statistics,
     store_scenario_statistics,
 )
-
-
-DEFAULT_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "modeling_reports", "statistical_reports")
-
 
 def safe_mean(values: List[float]) -> Optional[float]:
     return statistics.mean(values) if values else None
@@ -36,13 +33,6 @@ def ci95_half_width(values: List[float]) -> Optional[float]:
         return None
     sd = statistics.stdev(values)
     return 1.96 * sd / math.sqrt(len(values))
-
-
-def write_csv(path: str, rows: List[Dict[str, object]], fieldnames: List[str]) -> None:
-    with open(path, "w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 def fmt_number(value: Optional[float], digits: int = 3) -> str:
@@ -125,33 +115,35 @@ def compute_stability_delta(reference: Optional[float], final_value: Optional[fl
     return abs(reference - final_value) / abs(final_value) * 100.0
 
 
-def find_mean_variance_closest_checkpoint(
-    checkpoint_rows: Sequence[Dict[str, object]],
-    metric_column: str,
-) -> Optional[Dict[str, object]]:
-    candidates: List[Dict[str, object]] = []
-    for row in checkpoint_rows:
-        if row.get("metric_column") != metric_column:
-            continue
-        mean_value = row.get("mean")
-        std_value = row.get("std")
-        if mean_value is None or std_value is None:
-            continue
-        abs_gap = abs(float(mean_value) - float(std_value))
-        denom = max(abs(float(mean_value)), abs(float(std_value)), 1e-9)
-        rel_gap_pct = abs_gap / denom * 100.0
-        candidates.append(
-            {
-                **row,
-                "mean_std_abs_gap": abs_gap,
-                "mean_std_rel_gap_pct": rel_gap_pct,
-            }
-        )
+def variance_stability_series(values_by_checkpoint: Sequence[Tuple[int, float]]) -> List[Dict[str, object]]:
+    """Compute relative change in variance between consecutive checkpoints."""
+    result: List[Dict[str, object]] = []
+    prev_variance: Optional[float] = None
+    for file_count, variance in values_by_checkpoint:
+        if prev_variance is None or prev_variance == 0:
+            delta_pct = None
+        else:
+            delta_pct = abs(variance - prev_variance) / prev_variance * 100.0
+        result.append({"file_count": int(file_count), "variance": variance, "delta_pct": delta_pct})
+        prev_variance = variance
+    return result
 
-    if not candidates:
-        return None
 
-    return min(candidates, key=lambda row: (float(row["mean_std_abs_gap"]), int(row["file_count"])))
+def find_variance_stability_point(
+    stability_series: Sequence[Dict[str, object]], threshold_pct: float = 5.0
+) -> Tuple[Optional[int], Optional[float]]:
+    """Return the first checkpoint where variance stays stable for two steps."""
+    for i, row in enumerate(stability_series):
+        delta = row.get("delta_pct")
+        if delta is None or delta > threshold_pct:
+            continue
+        if i + 1 < len(stability_series):
+            next_delta = stability_series[i + 1].get("delta_pct")
+            if next_delta is not None and next_delta <= threshold_pct:
+                return int(row["file_count"]), float(delta)
+        else:
+            return int(row["file_count"]), float(delta)
+    return None, None
 
 
 def build_scenario_significance_rows(
@@ -177,40 +169,38 @@ def build_scenario_significance_rows(
             max_files=max_files,
             scenario_name=scenario_name,
         )
-        closest_row = find_mean_variance_closest_checkpoint(scenario_checkpoint_rows, metric_column="send_span_s")
+
+        variance_series = variance_stability_series(
+            [
+                (int(row["file_count"]), float(row["variance"]))
+                for row in scenario_checkpoint_rows
+                if row.get("metric_column") == "send_span_s" and row.get("variance") is not None
+            ]
+        )
+        stable_k, stable_delta = find_variance_stability_point(variance_series, threshold_pct=5.0)
 
         mean_value, variance_value, std_value = metric_stats(transfer_times)
         ci95_value = ci95_half_width(transfer_times)
         cv_pct = (std_value / mean_value * 100.0) if std_value is not None and mean_value not in (None, 0) else None
 
-        baseline_32_mean = None
-        baseline_32_variance = None
-        if len(transfer_times) >= 32:
-            first_32 = transfer_times[:32]
-            baseline_32_mean = safe_mean(first_32)
-            baseline_32_variance = safe_variance(first_32)
-
-        mean_delta_pct = compute_stability_delta(baseline_32_mean, mean_value)
-        variance_delta_pct = compute_stability_delta(baseline_32_variance, variance_value)
-
-        stable_mean = mean_delta_pct is not None and mean_delta_pct <= 5.0
-        stable_variance = variance_delta_pct is not None and variance_delta_pct <= 10.0
-
-        if closest_row is not None:
-            significance_flag = "closest_mean_std"
-            significance_note = (
-                f"closest mean≈std at file_count={int(closest_row['file_count'])} "
-                f"(abs_gap={closest_row['mean_std_abs_gap']:.3f})"
-            )
-        elif mean_delta_pct is None or variance_delta_pct is None:
-            significance_flag = "insufficient"
-            significance_note = "insufficient samples for significance check"
-        elif stable_mean and stable_variance:
+        if stable_k is not None:
             significance_flag = "stable"
-            significance_note = "32-file and final statistics are close"
+            significance_note = (
+                f"Var(X_k) stabilizes at k={stable_k} "
+                f"(relative change < 5% between consecutive checkpoints)"
+            )
+        elif len(transfer_times) >= 32:
+            significance_flag = "sufficient_32"
+            significance_note = (
+                "32+ samples collected — CLT approximations valid "
+                "even without full variance convergence"
+            )
         else:
-            significance_flag = "drifting"
-            significance_note = "material shift observed after 32 files"
+            significance_flag = "insufficient"
+            significance_note = (
+                f"Only {len(transfer_times)} samples — "
+                "variance has not stabilized, collect more data"
+            )
 
         scenario_rows.append(
             {
@@ -221,11 +211,8 @@ def build_scenario_significance_rows(
                 "std_transfer_time_s": std_value,
                 "ci95_half_width_s": ci95_value,
                 "cv_pct": cv_pct,
-                "mean_delta_32_to_final_pct": mean_delta_pct,
-                "variance_delta_32_to_final_pct": variance_delta_pct,
-                "closest_mean_std_file_count": closest_row["file_count"] if closest_row else None,
-                "closest_mean_std_abs_gap": closest_row["mean_std_abs_gap"] if closest_row else None,
-                "closest_mean_std_rel_gap_pct": closest_row["mean_std_rel_gap_pct"] if closest_row else None,
+                "stable_k": stable_k,
+                "variance_stability_delta_pct": stable_delta,
                 "significance_flag": significance_flag,
                 "significance_note": significance_note,
             }
@@ -313,85 +300,18 @@ def fetch_chunk_stats(conn: sqlite3.Connection, payload_id: str) -> Dict[str, ob
     }
 
 
-def build_markdown_summary(
-    out_path: str,
-    n_payloads: int,
-    payload_rows: List[Dict[str, object]],
-    sender_csv: str,
-    iface_csv: str,
-    prediction_csv: str,
-    scenario_csv: str,
-    cumulative_csv: str,
-    scenario_significance_csv: str,
-    cumulative_rows: List[Dict[str, object]],
-    scenario_significance_rows: List[Dict[str, object]],
-) -> None:
-    ack_rates = [float(r["acked_ratio_pct"]) for r in payload_rows if r.get("acked_ratio_pct") is not None]
-    send_spans = [float(r["send_span_s"]) for r in payload_rows if r.get("send_span_s") is not None]
-
-    lines = []
-    lines.append("# Sender Statistical Results Summary")
-    lines.append("")
-    lines.append(f"- Total payloads analysed: **{n_payloads}**")
-    lines.append(f"- Per-payload sender metrics: `{sender_csv}`")
-    lines.append(f"- Interface health summary: `{iface_csv}`")
-    lines.append(f"- Prediction summary: `{prediction_csv}`")
-    lines.append(f"- Scenario significance snapshot: `{scenario_csv}`")
-    lines.append(f"- Cumulative file-count statistics: `{cumulative_csv}`")
-    lines.append(f"- Scenario significance table: `{scenario_significance_csv}`")
-    lines.append("")
-    lines.append("## Sender KPIs")
-    lines.append("")
-    lines.append(f"- Mean chunk ACK ratio: **{fmt_number(safe_mean(ack_rates), 2)}%**")
-    lines.append(f"- Mean sender-side send span: **{fmt_number(safe_mean(send_spans), 3)} s**")
-    lines.append(f"- Send span CI95: **±{fmt_number(ci95_half_width(send_spans), 3)} s**")
-    lines.append("")
-    lines.append("## Table 1: File-count checkpoints (mean | variance | std)")
-    lines.append("")
-    lines.append("| files | relevant_column | mean | variance | std |")
-    lines.append("|---:|---|---:|---:|---:|")
-    for row in cumulative_rows:
-        lines.append(
-            f"| {int(row['file_count'])} | {row['metric_column']} | {fmt_number(row.get('mean'))} | {fmt_number(row.get('variance'))} | {fmt_number(row.get('std'))} |"
-        )
-    lines.append("")
-    lines.append("## Table 2: Scenario-based significance")
-    lines.append("")
-    lines.append("| scenario | files | mean | variance | std | closest file(mean≈std) | abs gap | rel gap % | significance |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---|")
-    for row in scenario_significance_rows:
-        lines.append(
-            f"| {row['scenario']} | {int(row['sample_count'])} | {fmt_number(row.get('mean_transfer_time_s'))} | {fmt_number(row.get('variance_transfer_time_s'))} | {fmt_number(row.get('std_transfer_time_s'))} | {fmt_number(row.get('closest_mean_std_file_count'), 0)} | {fmt_number(row.get('closest_mean_std_abs_gap'))} | {fmt_number(row.get('closest_mean_std_rel_gap_pct'), 2)} | {row['significance_note']} |"
-        )
-    lines.append("")
-    lines.append("## Stability Summary")
-    lines.append("")
-    stable_rows = [row for row in scenario_significance_rows if row.get("significance_flag") == "stable"]
-    if stable_rows:
-        lines.append(
-            "- At 32 files, mean and variance are close to final values for: "
-            + ", ".join(sorted(str(row["scenario"]) for row in stable_rows))
-            + "."
-        )
-    else:
-        lines.append("- At 32 files, no scenario met the configured closeness thresholds for both mean and variance.")
-    lines.append("")
-    lines.append("## Notes")
-    lines.append("")
-    lines.append("- This report is sender-only and uses only sender DB tables (`payloads`, `chunks`, `interface_stats`, `interface_metrics_history`, `interface_predictions`).")
-    lines.append("- `send_span_s` is computed from chunk `last_sent` min/max and represents sender transmission activity span, not receiver completion time.")
-    lines.append("- `run_statistics` stores one row per payload/run, while `scenario_statistics` stores appended snapshots for each scenario.")
-    lines.append("- Significance target is based on mean≈std closeness at checkpoint level for `send_span_s` (unit-consistent in seconds).")
-    lines.append("- Checkpoints are built by `--checkpoint-step` and `--max-files`; snapshots are appended to `checkpoint_statistics_history`.")
-
-    with open(out_path, "w") as handle:
-        handle.write("\n".join(lines) + "\n")
+def print_and_write_output(content_lines: List[str], output_file_handle=None):
+    """Helper function to print to stdout and optionally write to a file."""
+    for line in content_lines:
+        print(line)
+        if output_file_handle:
+            output_file_handle.write(line + "\n")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate sender-only statistical report from sender DB.")
     parser.add_argument("--sender-db", default=config.DB_PATH, help="Path to sender SQLite DB.")
-    parser.add_argument("--out-dir", default=DEFAULT_OUTPUT_DIR, help="Output directory for CSV/MD summary.")
+    parser.add_argument("--output-file", help="Optional path to write output to a text file.")
     parser.add_argument(
         "--allow-partial",
         action="store_true",
@@ -425,7 +345,6 @@ def main() -> None:
     if not os.path.exists(args.sender_db):
         raise SystemExit(f"Sender DB not found: {args.sender_db}")
 
-    os.makedirs(args.out_dir, exist_ok=True)
     init_sender_db(args.sender_db)
 
     while True:
@@ -640,130 +559,60 @@ def main() -> None:
 
         conn.close()
 
-        sender_csv = os.path.join(args.out_dir, "sender_per_payload_metrics.csv")
-        iface_dist_csv = os.path.join(args.out_dir, "sender_interface_assignment.csv")
-        iface_health_csv = os.path.join(args.out_dir, "sender_interface_health.csv")
-        prediction_csv = os.path.join(args.out_dir, "sender_prediction_snapshot.csv")
-        scenario_csv = os.path.join(args.out_dir, "scenario_statistics_snapshot.csv")
-        cumulative_csv = os.path.join(args.out_dir, "cumulative_file_count_statistics.csv")
-        scenario_significance_csv = os.path.join(args.out_dir, "scenario_significance_summary.csv")
-        summary_md = os.path.join(args.out_dir, "sender_statistical_summary.md")
+        # --- Prepare Output Content ---
+        output_lines = []
+        output_lines.append("=" * 80)
+        output_lines.append("SENDER STATISTICAL REPORT SUMMARY")
+        output_lines.append("=" * 80)
+        output_lines.append("")
 
-        write_csv(
-            sender_csv,
-            per_payload_rows,
-            [
-                "payload_id",
-                "filename",
-                "scenario",
-                "status",
-                "total_chunks_declared",
-                "chunks_rows",
-                "acked_rows",
-                "pending_rows",
-                "sending_rows",
-                "acked_ratio_pct",
-                "avg_attempts",
-                "max_attempts",
-                "send_span_s",
-                "first_last_sent",
-                "last_last_sent",
-            ],
+        # Scenario Statistics Snapshots
+        if scenario_snapshot_rows:
+            output_lines.append("SCENARIO STATISTICS SNAPSHOT (Aggregated per Scenario):")
+            output_lines.append(f"  {'Scenario':<20} {'Samples':<8} {'Mean (s)':<10} {'Variance':<12} {'Std Dev (s)':<12} {'Min (s)':<10} {'Max (s)':<10}")
+            for row in scenario_snapshot_rows:
+                output_lines.append(
+                    f"  {row['scenario']:<20} {row['sample_count']:<8} {fmt_number(row['mean_transfer_time_s']):<10} {fmt_number(row['variance_transfer_time_s']):<12} {fmt_number(row['std_transfer_time_s']):<12} {fmt_number(row['min_transfer_time_s']):<10} {fmt_number(row['max_transfer_time_s']):<10}"
+                )
+            output_lines.append("") # Empty line
+
+        # Scenario Significance Summary
+        output_lines.append("SCENARIO SIGNIFICANCE SUMMARY:")
+        output_lines.append(f"  {'Scenario':<20} {'Files':<6} {'Mean (s)':<10} {'Var (s²)':<12} {'Stable k':<10} {'Significance Flag':<20}")
+        for row in scenario_significance_rows:
+            stable_k_str = fmt_number(row.get('stable_k'), 0) if row.get('stable_k') is not None else 'N/A'
+            output_lines.append(
+                f"  {row['scenario']:<20} {row['sample_count']:<6} {fmt_number(row.get('mean_transfer_time_s')):<10} {fmt_number(row.get('variance_transfer_time_s')):<12} {stable_k_str:<10} {row['significance_flag']:<20}"
+            )
+        output_lines.append("") # Empty line
+        output_lines.append("=" * 80)
+
+        # --- Print/Write Output ---
+        report_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "modeling_reports",
+            "statistical_reports",
         )
+        os.makedirs(report_dir, exist_ok=True)
+        scenario_labels = sorted({str(row.get("scenario") or "unknown") for row in scenario_significance_rows})
+        scenario_name = "_".join(scenario_labels) if scenario_labels else "overall"
+        safe_scenario = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in scenario_name)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        auto_output_file = os.path.join(report_dir, f"statistical_report_{safe_scenario}_{timestamp}.txt")
 
-        write_csv(
-            iface_dist_csv,
-            iface_distribution_rows,
-            ["payload_id", "interface_ip", "assigned_chunks", "assigned_share_pct"],
-        )
+        if args.output_file:
+             with open(args.output_file, 'w') as f:
+                 print_and_write_output(output_lines, f)
+        else:
+             print_and_write_output(output_lines)
 
-        write_csv(
-            iface_health_csv,
-            iface_health_rows,
-            [
-                "interface_ip",
-                "avg_rtt_ms",
-                "throughput_bps",
-                "jitter_ms",
-                "loss_rate_pct",
-                "instant_bitrate",
-                "performance_score",
-                "last_check",
-            ],
-        )
+        with open(auto_output_file, "w") as f:
+            for line in output_lines:
+                f.write(line + "\n")
 
-        write_csv(
-            prediction_csv,
-            prediction_rows,
-            ["interface_ip", "predicted_rtt", "predicted_bitrate", "avg_jitter", "avg_loss", "blended_score", "timestamp"],
-        )
-
-        write_csv(
-            scenario_csv,
-            scenario_snapshot_rows,
-            [
-                "scenario",
-                "sample_count",
-                "mean_transfer_time_s",
-                "variance_transfer_time_s",
-                "std_transfer_time_s",
-                "min_transfer_time_s",
-                "max_transfer_time_s",
-                "ci95_half_width_s",
-                "source_payload_count",
-            ],
-        )
-
-        write_csv(
-            cumulative_csv,
-            cumulative_rows,
-            ["scenario", "file_count", "metric_column", "sample_count", "mean", "variance", "std"],
-        )
-
-        write_csv(
-            scenario_significance_csv,
-            scenario_significance_rows,
-            [
-                "scenario",
-                "sample_count",
-                "mean_transfer_time_s",
-                "variance_transfer_time_s",
-                "std_transfer_time_s",
-                "ci95_half_width_s",
-                "cv_pct",
-                "mean_delta_32_to_final_pct",
-                "variance_delta_32_to_final_pct",
-                "closest_mean_std_file_count",
-                "closest_mean_std_abs_gap",
-                "closest_mean_std_rel_gap_pct",
-                "significance_flag",
-                "significance_note",
-            ],
-        )
-
-        build_markdown_summary(
-            summary_md,
-            n_payloads=len(per_payload_rows),
-            payload_rows=per_payload_rows,
-            sender_csv=sender_csv,
-            iface_csv=iface_health_csv,
-            prediction_csv=prediction_csv,
-            scenario_csv=scenario_csv,
-            cumulative_csv=cumulative_csv,
-            scenario_significance_csv=scenario_significance_csv,
-            cumulative_rows=cumulative_rows,
-            scenario_significance_rows=scenario_significance_rows,
-        )
-
-        print("Sender statistical report generated:")
-        print(f" - {sender_csv}")
-        print(f" - {iface_dist_csv}")
-        print(f" - {iface_health_csv}")
-        print(f" - {prediction_csv}")
-        print(f" - {scenario_csv}")
-        print(f" - {cumulative_csv}")
-        print(f" - {scenario_significance_csv}")
-        print(f" - {summary_md}")
+        print("") # Extra newline after report
+        print(f"Statistical report generated (printed to {'file' if args.output_file else 'console'}).")
+        print(f"Snapshot report saved: {auto_output_file}")
 
         if not args.watch:
             break
