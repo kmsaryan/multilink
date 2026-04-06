@@ -134,24 +134,24 @@ def find_mean_variance_closest_checkpoint(
         if row.get("metric_column") != metric_column:
             continue
         mean_value = row.get("mean")
-        variance_value = row.get("variance")
-        if mean_value is None or variance_value is None:
+        std_value = row.get("std")
+        if mean_value is None or std_value is None:
             continue
-        abs_gap = abs(float(mean_value) - float(variance_value))
-        denom = max(abs(float(mean_value)), abs(float(variance_value)), 1e-9)
+        abs_gap = abs(float(mean_value) - float(std_value))
+        denom = max(abs(float(mean_value)), abs(float(std_value)), 1e-9)
         rel_gap_pct = abs_gap / denom * 100.0
         candidates.append(
             {
                 **row,
-                "mean_variance_abs_gap": abs_gap,
-                "mean_variance_rel_gap_pct": rel_gap_pct,
+                "mean_std_abs_gap": abs_gap,
+                "mean_std_rel_gap_pct": rel_gap_pct,
             }
         )
 
     if not candidates:
         return None
 
-    return min(candidates, key=lambda row: (float(row["mean_variance_abs_gap"]), int(row["file_count"])))
+    return min(candidates, key=lambda row: (float(row["mean_std_abs_gap"]), int(row["file_count"])))
 
 
 def build_scenario_significance_rows(
@@ -197,10 +197,10 @@ def build_scenario_significance_rows(
         stable_variance = variance_delta_pct is not None and variance_delta_pct <= 10.0
 
         if closest_row is not None:
-            significance_flag = "closest_mean_variance"
+            significance_flag = "closest_mean_std"
             significance_note = (
-                f"closest mean≈variance at file_count={int(closest_row['file_count'])} "
-                f"(abs_gap={closest_row['mean_variance_abs_gap']:.3f})"
+                f"closest mean≈std at file_count={int(closest_row['file_count'])} "
+                f"(abs_gap={closest_row['mean_std_abs_gap']:.3f})"
             )
         elif mean_delta_pct is None or variance_delta_pct is None:
             significance_flag = "insufficient"
@@ -223,9 +223,9 @@ def build_scenario_significance_rows(
                 "cv_pct": cv_pct,
                 "mean_delta_32_to_final_pct": mean_delta_pct,
                 "variance_delta_32_to_final_pct": variance_delta_pct,
-                "closest_mean_variance_file_count": closest_row["file_count"] if closest_row else None,
-                "closest_mean_variance_abs_gap": closest_row["mean_variance_abs_gap"] if closest_row else None,
-                "closest_mean_variance_rel_gap_pct": closest_row["mean_variance_rel_gap_pct"] if closest_row else None,
+                "closest_mean_std_file_count": closest_row["file_count"] if closest_row else None,
+                "closest_mean_std_abs_gap": closest_row["mean_std_abs_gap"] if closest_row else None,
+                "closest_mean_std_rel_gap_pct": closest_row["mean_std_rel_gap_pct"] if closest_row else None,
                 "significance_flag": significance_flag,
                 "significance_note": significance_note,
             }
@@ -357,11 +357,11 @@ def build_markdown_summary(
     lines.append("")
     lines.append("## Table 2: Scenario-based significance")
     lines.append("")
-    lines.append("| scenario | files | mean | variance | std | closest file(mean≈var) | abs gap | rel gap % | significance |")
+    lines.append("| scenario | files | mean | variance | std | closest file(mean≈std) | abs gap | rel gap % | significance |")
     lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---|")
     for row in scenario_significance_rows:
         lines.append(
-            f"| {row['scenario']} | {int(row['sample_count'])} | {fmt_number(row.get('mean_transfer_time_s'))} | {fmt_number(row.get('variance_transfer_time_s'))} | {fmt_number(row.get('std_transfer_time_s'))} | {fmt_number(row.get('closest_mean_variance_file_count'), 0)} | {fmt_number(row.get('closest_mean_variance_abs_gap'))} | {fmt_number(row.get('closest_mean_variance_rel_gap_pct'), 2)} | {row['significance_note']} |"
+            f"| {row['scenario']} | {int(row['sample_count'])} | {fmt_number(row.get('mean_transfer_time_s'))} | {fmt_number(row.get('variance_transfer_time_s'))} | {fmt_number(row.get('std_transfer_time_s'))} | {fmt_number(row.get('closest_mean_std_file_count'), 0)} | {fmt_number(row.get('closest_mean_std_abs_gap'))} | {fmt_number(row.get('closest_mean_std_rel_gap_pct'), 2)} | {row['significance_note']} |"
         )
     lines.append("")
     lines.append("## Stability Summary")
@@ -381,7 +381,7 @@ def build_markdown_summary(
     lines.append("- This report is sender-only and uses only sender DB tables (`payloads`, `chunks`, `interface_stats`, `interface_metrics_history`, `interface_predictions`).")
     lines.append("- `send_span_s` is computed from chunk `last_sent` min/max and represents sender transmission activity span, not receiver completion time.")
     lines.append("- `run_statistics` stores one row per payload/run, while `scenario_statistics` stores appended snapshots for each scenario.")
-    lines.append("- Significance target is based on mean≈variance closeness at checkpoint level for `send_span_s`.")
+    lines.append("- Significance target is based on mean≈std closeness at checkpoint level for `send_span_s` (unit-consistent in seconds).")
     lines.append("- Checkpoints are built by `--checkpoint-step` and `--max-files`; snapshots are appended to `checkpoint_statistics_history`.")
 
     with open(out_path, "w") as handle:
@@ -733,9 +733,9 @@ def main() -> None:
                 "cv_pct",
                 "mean_delta_32_to_final_pct",
                 "variance_delta_32_to_final_pct",
-                "closest_mean_variance_file_count",
-                "closest_mean_variance_abs_gap",
-                "closest_mean_variance_rel_gap_pct",
+                "closest_mean_std_file_count",
+                "closest_mean_std_abs_gap",
+                "closest_mean_std_rel_gap_pct",
                 "significance_flag",
                 "significance_note",
             ],

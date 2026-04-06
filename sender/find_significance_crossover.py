@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Reads accumulated checkpoint statistics from the sender DB and finds
-where mean and variance converge for a chosen metric.
+where mean and standard deviation converge for a chosen metric.
 """
 import argparse
 import os
@@ -18,19 +18,34 @@ from db_utils import fetch_checkpoint_history
 
 def find_crossover(rows, tolerance_pct=10.0):
     """
-    Return the first row where abs(mean - variance) / max(mean, variance)
+    Return the first row where abs(mean - std) / max(mean, std)
     is within tolerance_pct.
     """
     for row in rows:
         mean = row["mean_value"]
-        variance = row["variance_value"]
-        if mean is None or variance is None or mean == 0:
+        std = row["std_value"]
+        if mean is None or std is None:
             continue
-        denom = max(abs(mean), abs(variance), 1e-9)
-        rel_gap_pct = abs(mean - variance) / denom * 100.0
+        denom = max(abs(mean), abs(std), 1e-9)
+        rel_gap_pct = abs(mean - std) / denom * 100.0
         if rel_gap_pct <= tolerance_pct:
             return row, rel_gap_pct
     return None, None
+
+
+def find_nearest(rows):
+    """Return the checkpoint row with the smallest relative mean-std gap."""
+    best = None
+    for row in rows:
+        mean = row["mean_value"]
+        std = row["std_value"]
+        if mean is None or std is None:
+            continue
+        denom = max(abs(mean), abs(std), 1e-9)
+        rel_gap_pct = abs(mean - std) / denom * 100.0
+        if best is None or rel_gap_pct < best[1]:
+            best = (row, rel_gap_pct)
+    return best
 
 
 def main():
@@ -44,10 +59,11 @@ def main():
         help="Metric column to analyse (default: send_span_s).",
     )
     parser.add_argument(
-        "--tolerance",
+        "tolerance",
+        nargs="?",
         type=float,
         default=10.0,
-        help="Relative gap tolerance in percent for mean≈variance (default: 10.0).",
+        help="Relative gap tolerance in percent for mean≈std (default: 10.0).",
     )
     parser.add_argument(
         "--out-dir",
@@ -69,7 +85,7 @@ def main():
         )
 
     print(f"\nAccumulated checkpoint history for metric: {args.metric}")
-    print(f"{'files':>6}  {'mean':>10}  {'variance':>10}  {'std':>8}  {'rel_gap_%':>10}  {'n_reports':>9}")
+    print(f"{'files':>6}  {'mean_s':>10}  {'variance_s2':>12}  {'std_s':>10}  {'rel_gap_mean_std_%':>19}  {'n_reports':>9}")
     print("-" * 62)
 
     file_counts = []
@@ -82,8 +98,8 @@ def main():
         mean = row["mean_value"]
         variance = row["variance_value"]
         std = row["std_value"]
-        denom = max(abs(mean), abs(variance), 1e-9)
-        rel_gap = abs(mean - variance) / denom * 100.0
+        denom = max(abs(mean), abs(std if std is not None else 0.0), 1e-9)
+        rel_gap = abs(mean - (std if std is not None else 0.0)) / denom * 100.0
 
         file_counts.append(row["file_count"])
         means.append(mean)
@@ -94,9 +110,9 @@ def main():
         print(
             f"{row['file_count']:>6}  "
             f"{mean:>10.4f}  "
-            f"{variance:>10.4f}  "
-            f"{(std if std is not None else 0.0):>8.4f}  "
-            f"{rel_gap:>10.2f}  "
+            f"{variance:>12.4f}  "
+            f"{(std if std is not None else 0.0):>10.4f}  "
+            f"{rel_gap:>19.2f}  "
             f"{row['n_reports']:>9}"
         )
 
@@ -104,12 +120,20 @@ def main():
     if crossover_row:
         print(
             f"\nCrossover found at file_count = {crossover_row['file_count']} "
-            f"(rel_gap = {crossover_gap:.2f}% <= {args.tolerance}%)"
+            f"(mean-std rel_gap = {crossover_gap:.2f}% <= {args.tolerance}%)"
         )
     else:
+        nearest = find_nearest(rows)
+        nearest_text = ""
+        if nearest is not None:
+            nearest_row, nearest_gap = nearest
+            nearest_text = (
+                f" Nearest checkpoint is file_count={nearest_row['file_count']} "
+                f"with mean-std rel_gap={nearest_gap:.2f}%."
+            )
         print(
             f"\nNo crossover found within tolerance {args.tolerance}%. "
-            "More runs or a higher tolerance may be needed."
+            f"More runs may be needed.{nearest_text}"
         )
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -138,12 +162,12 @@ def main():
             label=f"Crossover at n={crossover_row['file_count']}",
         )
     ax1.set_ylabel(f"{args.metric} (s)")
-    ax1.set_title(f"Mean vs Variance convergence — {args.metric}")
+    ax1.set_title(f"Mean / Std trend — {args.metric}")
     ax1.legend()
     ax1.grid(True, alpha=0.3)
 
     ax2 = axes[1]
-    ax2.plot(file_counts, rel_gaps, "D-", color="#9C27B0", label="Relative gap %")
+    ax2.plot(file_counts, rel_gaps, "D-", color="#9C27B0", label="Relative gap (mean vs std) %")
     ax2.axhline(
         y=args.tolerance,
         color="red",
@@ -159,7 +183,7 @@ def main():
             linewidth=1.5,
         )
     ax2.set_xlabel("Number of files (cumulative)")
-    ax2.set_ylabel("Relative gap |mean - variance| / max (%)")
+    ax2.set_ylabel("Relative gap |mean - std| / max (%)")
     ax2.set_title("Convergence gap — lower is more stable")
     ax2.legend()
     ax2.grid(True, alpha=0.3)
