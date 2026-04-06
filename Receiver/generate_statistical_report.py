@@ -2,7 +2,6 @@
 import argparse
 import csv
 import hashlib
-import math
 import os
 import sqlite3
 import statistics
@@ -35,13 +34,6 @@ def safe_stdev(values: List[float]) -> Optional[float]:
 
 def safe_variance(values: List[float]) -> Optional[float]:
     return statistics.variance(values) if len(values) >= 2 else None
-
-
-def ci95_half_width(values: List[float]) -> Optional[float]:
-    if len(values) < 2:
-        return None
-    sd = statistics.stdev(values)
-    return 1.96 * sd / math.sqrt(len(values))
 
 
 def sha256_file(file_path: str) -> Optional[str]:
@@ -122,67 +114,6 @@ def write_csv(path: str, rows: List[Dict[str, object]], fieldnames: List[str]) -
         writer.writerows(rows)
 
 
-def fmt_number(value: Optional[float], digits: int = 3) -> str:
-    if value is None:
-        return "NA"
-    return f"{value:.{digits}f}"
-
-
-def build_markdown_summary(
-    out_path: str,
-    run_count: int,
-    scenario_summary_rows: List[Dict[str, object]],
-    per_run_csv: str,
-    scenario_csv: str,
-    scenario_snapshot_csv: str,
-    checkpoint_csv: str,
-    iface_csv: str,
-) -> None:
-    lines = []
-    lines.append("# Receiver Statistical Results Summary")
-    lines.append("")
-    lines.append(f"- Total runs analysed: **{run_count}**")
-    lines.append(f"- Per-run metrics: `{per_run_csv}`")
-    lines.append(f"- Scenario summary: `{scenario_csv}`")
-    lines.append(f"- Scenario snapshot: `{scenario_snapshot_csv}`")
-    lines.append(f"- Checkpoint snapshot: `{checkpoint_csv}`")
-    lines.append(f"- Interface contribution summary: `{iface_csv}`")
-    lines.append("")
-    lines.append("## Scenario Summary")
-    lines.append("")
-    lines.append("| Scenario | Runs | Completion Rate | File Present Rate | Chunk-to-Chunk Mean ± CI95 | Chunk-to-Chunk Min/Max | File-to-File Mean ± CI95 | File-to-File Min/Max | Mean Goodput (Mbps) ± CI95 |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
-
-    for row in scenario_summary_rows:
-        lines.append(
-            "| {scenario} | {n_runs} | {completion_rate_pct:.1f}% | {file_present_rate_pct:.1f}% | {ctc_mean} ± {ctc_ci} | {ctc_min} / {ctc_max} | {ftf_mean} ± {ftf_ci} | {ftf_min} / {ftf_max} | {g_mean} ± {g_ci} |".format(
-                scenario=row["scenario"],
-                n_runs=int(row["n_runs"]),
-                completion_rate_pct=float(row["completion_rate_pct"]),
-                file_present_rate_pct=float(row["file_present_rate_pct"]),
-                ctc_mean=fmt_number(row.get("chunk_to_chunk_time_mean_s"), 3),
-                ctc_ci=fmt_number(row.get("chunk_to_chunk_time_ci95_s"), 3),
-                ctc_min=fmt_number(row.get("chunk_to_chunk_time_min_s"), 3),
-                ctc_max=fmt_number(row.get("chunk_to_chunk_time_max_s"), 3),
-                ftf_mean=fmt_number(row.get("file_to_file_time_mean_s"), 3),
-                ftf_ci=fmt_number(row.get("file_to_file_time_ci95_s"), 3),
-                ftf_min=fmt_number(row.get("file_to_file_time_min_s"), 3),
-                ftf_max=fmt_number(row.get("file_to_file_time_max_s"), 3),
-                g_mean=fmt_number(row.get("goodput_mean_mbps"), 3),
-                g_ci=fmt_number(row.get("goodput_ci95_mbps"), 3),
-            )
-        )
-
-    lines.append("")
-    lines.append("## Notes")
-    lines.append("")
-    lines.append("- This report is receiver-only and uses only the receiver SQLite database and received files.")
-    lines.append("- `completion_rate` uses receiver `file_map` completion status and chunk counts.")
-    lines.append("- `file_present_rate` checks whether the reconstructed file exists in receiver storage.")
-    lines.append("- CI95 uses normal approximation: mean ± 1.96 * (std / sqrt(n)).")
-
-    with open(out_path, "w") as handle:
-        handle.write("\n".join(lines) + "\n")
 
 
 def is_transfer_complete(row: sqlite3.Row) -> bool:
@@ -240,7 +171,6 @@ def build_receiver_checkpoint_rows(per_run_rows, checkpoint_step=2, max_files=50
             mean_val = safe_mean(values)
             var_val = safe_variance(values)
             std_val = safe_stdev(values)
-            ci_val = ci95_half_width(values)
             output.append(
                 {
                     "file_count": n,
@@ -249,7 +179,6 @@ def build_receiver_checkpoint_rows(per_run_rows, checkpoint_step=2, max_files=50
                     "mean": mean_val,
                     "variance": var_val,
                     "std": std_val,
-                    "ci95": ci_val,
                 }
             )
 
@@ -395,28 +324,23 @@ def generate_reports_for_rows(args, payload_rows: List[sqlite3.Row], report_id: 
                 "chunk_to_chunk_time_std_s": safe_stdev(chunk_to_chunk_vals),
                 "chunk_to_chunk_time_min_s": min(chunk_to_chunk_vals) if chunk_to_chunk_vals else None,
                 "chunk_to_chunk_time_max_s": max(chunk_to_chunk_vals) if chunk_to_chunk_vals else None,
-                "chunk_to_chunk_time_ci95_s": ci95_half_width(chunk_to_chunk_vals),
                 "file_to_file_time_mean_s": safe_mean(file_to_file_vals),
                 "file_to_file_time_variance_s": safe_variance(file_to_file_vals),
                 "file_to_file_time_std_s": safe_stdev(file_to_file_vals),
                 "file_to_file_time_min_s": min(file_to_file_vals) if file_to_file_vals else None,
                 "file_to_file_time_max_s": max(file_to_file_vals) if file_to_file_vals else None,
-                "file_to_file_time_ci95_s": ci95_half_width(file_to_file_vals),
                 "goodput_mean_mbps": safe_mean(goodput_vals),
                 "goodput_variance_mbps": safe_variance(goodput_vals),
                 "goodput_std_mbps": safe_stdev(goodput_vals),
                 "goodput_min_mbps": min(goodput_vals) if goodput_vals else None,
                 "goodput_max_mbps": max(goodput_vals) if goodput_vals else None,
-                "goodput_ci95_mbps": ci95_half_width(goodput_vals),
             }
         )
 
     per_run_csv = os.path.join(args.out_dir, f"per_run_metrics_{report_id}.csv")
     scenario_csv = os.path.join(args.out_dir, f"scenario_summary_{report_id}.csv")
-    scenario_snapshot_csv = os.path.join(args.out_dir, f"scenario_statistics_snapshot_{report_id}.csv")
     checkpoint_csv = os.path.join(args.out_dir, f"receiver_checkpoint_statistics_{report_id}.csv")
     iface_csv = os.path.join(args.out_dir, f"interface_contribution_{report_id}.csv")
-    summary_md = os.path.join(args.out_dir, f"statistical_summary_{report_id}.md")
 
     write_csv(
         per_run_csv,
@@ -456,56 +380,23 @@ def generate_reports_for_rows(args, payload_rows: List[sqlite3.Row], report_id: 
             "chunk_to_chunk_time_std_s",
             "chunk_to_chunk_time_min_s",
             "chunk_to_chunk_time_max_s",
-            "chunk_to_chunk_time_ci95_s",
             "file_to_file_time_mean_s",
             "file_to_file_time_variance_s",
             "file_to_file_time_std_s",
             "file_to_file_time_min_s",
             "file_to_file_time_max_s",
-            "file_to_file_time_ci95_s",
             "goodput_mean_mbps",
             "goodput_variance_mbps",
             "goodput_std_mbps",
             "goodput_min_mbps",
             "goodput_max_mbps",
-            "goodput_ci95_mbps",
-        ],
-    )
-
-    write_csv(
-        scenario_snapshot_csv,
-        scenario_summary_rows,
-        [
-            "scenario",
-            "n_runs",
-            "sample_count",
-            "completion_rate_pct",
-            "file_present_rate_pct",
-            "chunk_to_chunk_time_mean_s",
-            "chunk_to_chunk_time_variance_s",
-            "chunk_to_chunk_time_std_s",
-            "chunk_to_chunk_time_min_s",
-            "chunk_to_chunk_time_max_s",
-            "chunk_to_chunk_time_ci95_s",
-            "file_to_file_time_mean_s",
-            "file_to_file_time_variance_s",
-            "file_to_file_time_std_s",
-            "file_to_file_time_min_s",
-            "file_to_file_time_max_s",
-            "file_to_file_time_ci95_s",
-            "goodput_mean_mbps",
-            "goodput_variance_mbps",
-            "goodput_std_mbps",
-            "goodput_min_mbps",
-            "goodput_max_mbps",
-            "goodput_ci95_mbps",
         ],
     )
 
     write_csv(
         checkpoint_csv,
         checkpoint_rows,
-        ["scenario", "file_count", "metric", "sample_count", "mean", "variance", "std", "ci95"],
+        ["scenario", "file_count", "metric", "sample_count", "mean", "variance", "std"],
     )
 
     store_scenario_statistics(report_id, scenario_summary_rows)
@@ -516,24 +407,11 @@ def generate_reports_for_rows(args, payload_rows: List[sqlite3.Row], report_id: 
         ["payload_id", "scenario", "source_ip", "chunks", "chunk_share_pct"],
     )
 
-    build_markdown_summary(
-        summary_md,
-        run_count=len(per_run_rows),
-        scenario_summary_rows=scenario_summary_rows,
-        per_run_csv=per_run_csv,
-        scenario_csv=scenario_csv,
-        scenario_snapshot_csv=scenario_snapshot_csv,
-        checkpoint_csv=checkpoint_csv,
-        iface_csv=iface_csv,
-    )
-
     print("Receiver statistical report generated:")
     print(f" - {per_run_csv}")
     print(f" - {scenario_csv}")
-    print(f" - {scenario_snapshot_csv}")
     print(f" - {checkpoint_csv}")
     print(f" - {iface_csv}")
-    print(f" - {summary_md}")
 
 
 def main() -> None:
