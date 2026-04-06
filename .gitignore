@@ -28,3 +28,6 @@ Thumbs.db
 *.log
 *.tmp
 
+# Local recovery backups
+backups/
+
