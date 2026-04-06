@@ -486,12 +486,6 @@ def main() -> None:
                 }
             )
 
-        cumulative_rows = build_cumulative_file_rows(
-            per_payload_rows,
-            checkpoint_step=args.checkpoint_step,
-            max_files=args.max_files,
-            scenario_name="overall",
-        )
         scenario_significance_rows = build_scenario_significance_rows(
             per_payload_rows,
             checkpoint_step=args.checkpoint_step,
@@ -499,18 +493,30 @@ def main() -> None:
         )
 
         report_run_id = str(uuid.uuid4())
-        for row in cumulative_rows:
-            store_checkpoint_statistics(
-                args.sender_db,
-                report_run_id=report_run_id,
-                scenario=str(row.get("scenario") or "overall"),
-                metric_column=str(row.get("metric_column") or "unknown"),
-                file_count=int(row.get("file_count") or 0),
-                sample_count=int(row.get("sample_count") or 0),
-                mean_value=float(row["mean"]) if row.get("mean") is not None else None,
-                variance_value=float(row["variance"]) if row.get("variance") is not None else None,
-                std_value=float(row["std"]) if row.get("std") is not None else None,
+        scenario_groups: Dict[str, List[Dict[str, object]]] = {}
+        for row in per_payload_rows:
+            scenario_name = str(row.get("scenario") or "unknown")
+            scenario_groups.setdefault(scenario_name, []).append(row)
+
+        for scenario_name, scenario_rows in sorted(scenario_groups.items(), key=lambda item: item[0]):
+            cumulative_rows = build_cumulative_file_rows(
+                scenario_rows,
+                checkpoint_step=args.checkpoint_step,
+                max_files=args.max_files,
+                scenario_name=scenario_name,
             )
+            for row in cumulative_rows:
+                store_checkpoint_statistics(
+                    args.sender_db,
+                    report_run_id=report_run_id,
+                    scenario=str(row.get("scenario") or scenario_name or "unknown"),
+                    metric_column=str(row.get("metric_column") or "unknown"),
+                    file_count=int(row.get("file_count") or 0),
+                    sample_count=int(row.get("sample_count") or 0),
+                    mean_value=float(row["mean"]) if row.get("mean") is not None else None,
+                    variance_value=float(row["variance"]) if row.get("variance") is not None else None,
+                    std_value=float(row["std"]) if row.get("std") is not None else None,
+                )
 
         iface_health_rows: List[Dict[str, object]] = []
         if table_exists(conn, "interface_stats"):
