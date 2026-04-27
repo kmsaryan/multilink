@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import fnmatch
 import os
 import re
 import sqlite3
@@ -20,6 +21,12 @@ def numeric_run_key(filename):
     if not match:
         return (10**9, filename or "")
     return (int(match.group(1)), filename or "")
+
+
+def matches_filename_pattern(filename, pattern):
+    if not pattern:
+        return True
+    return fnmatch.fnmatchcase(filename or "", pattern)
 
 
 def fetch_checkpoint_history_by_scenario(db_path, metric_column="send_span_s", scenario=None):
@@ -68,7 +75,7 @@ def fetch_checkpoint_history_by_scenario(db_path, metric_column="send_span_s", s
     return result
 
 
-def fetch_raw_transfer_samples_by_scenario(db_path, scenario=None):
+def fetch_raw_transfer_samples_by_scenario(db_path, scenario=None, filename_pattern=None):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
@@ -97,6 +104,8 @@ def fetch_raw_transfer_samples_by_scenario(db_path, scenario=None):
     for row in rows:
         scenario_name = str(row[0] or "unknown")
         filename = str(row[1] or "")
+        if not matches_filename_pattern(filename, filename_pattern):
+            continue
         transfer_time_s = float(row[2]) if row[2] is not None else None
         result.setdefault(scenario_name, []).append(
             {
@@ -108,6 +117,37 @@ def fetch_raw_transfer_samples_by_scenario(db_path, scenario=None):
     for scenario_name in result:
         result[scenario_name] = sorted(result[scenario_name], key=lambda item: numeric_run_key(item["filename"]))
 
+    return result
+
+
+def build_checkpoint_rows_from_raw_samples(raw_samples_by_scenario):
+    result = {}
+    for scenario_name, samples in raw_samples_by_scenario.items():
+        running = []
+        scenario_rows = []
+        for idx, sample in enumerate(samples, start=1):
+            transfer = sample.get("transfer_time_s")
+            if transfer is None:
+                continue
+            running.append(float(transfer))
+            mean_value = float(np.mean(running))
+            if len(running) >= 2:
+                variance_value = float(np.var(running, ddof=1))
+                std_value = float(np.std(running, ddof=1))
+            else:
+                variance_value = 0.0
+                std_value = 0.0
+            scenario_rows.append(
+                {
+                    "file_count": idx,
+                    "mean_value": mean_value,
+                    "variance_value": variance_value,
+                    "std_value": std_value,
+                    "n_reports": 1,
+                }
+            )
+        if scenario_rows:
+            result[scenario_name] = scenario_rows
     return result
 
 
@@ -214,21 +254,39 @@ def main():
             "statistical_reports",
         ),
     )
+    parser.add_argument(
+        "--filename-pattern",
+        default=None,
+        help=(
+            "Optional shell-style filename filter (e.g., 'Nlos_LinkFail2_*.data'). "
+            "When provided, variance checkpoints are recomputed from filtered raw samples."
+        ),
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.sender_db):
         sys.exit(f"Sender DB not found: {args.sender_db}")
 
-    scenario_rows = fetch_checkpoint_history_by_scenario(
-        args.sender_db,
-        metric_column=args.metric,
-        scenario=args.scenario,
-    )
     raw_samples_by_scenario = fetch_raw_transfer_samples_by_scenario(
         args.sender_db,
         scenario=args.scenario,
+        filename_pattern=args.filename_pattern,
     )
+
+    if args.filename_pattern:
+        scenario_rows = build_checkpoint_rows_from_raw_samples(raw_samples_by_scenario)
+    else:
+        scenario_rows = fetch_checkpoint_history_by_scenario(
+            args.sender_db,
+            metric_column=args.metric,
+            scenario=args.scenario,
+        )
+
     if not scenario_rows:
+        if args.filename_pattern:
+            sys.exit(
+                "No raw run_statistics samples matched the requested filename pattern."
+            )
         sys.exit(
             "No checkpoint history found. "
             "Run generate_statistical_report.py at least once first."

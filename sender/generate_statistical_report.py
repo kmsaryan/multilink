@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import fnmatch
 import math
 import os
 import re
@@ -54,6 +55,12 @@ def numeric_run_key(filename: str) -> Tuple[int, str]:
     if not match:
         return (10**9, filename or "")
     return (int(match.group(1)), filename or "")
+
+
+def matches_filename_pattern(filename: str, pattern: Optional[str]) -> bool:
+    if not pattern:
+        return True
+    return fnmatch.fnmatchcase(filename or "", pattern)
 
 
 def select_checkpoints(n_payloads: int, step: int, max_files: Optional[int]) -> List[int]:
@@ -340,6 +347,14 @@ def main() -> None:
         default=50,
         help="Maximum file-count checkpoint to evaluate (capped by available payloads).",
     )
+    parser.add_argument(
+        "--filename-pattern",
+        default=None,
+        help=(
+            "Optional shell-style filename filter applied to payload filenames "
+            "(e.g., 'Nlos_LinkFail2_*.data')."
+        ),
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.sender_db):
@@ -356,12 +371,20 @@ def main() -> None:
             raise SystemExit("Sender DB missing required tables `payloads` or `chunks`.")
 
         payload_base_rows = fetch_payload_rows(conn)
+        if args.filename_pattern:
+            payload_base_rows = [
+                row for row in payload_base_rows if matches_filename_pattern(str(row["filename"] or ""), args.filename_pattern)
+            ]
         if not payload_base_rows:
             conn.close()
             if args.watch:
                 print(f"[watch] No payload rows yet. Retrying in {args.poll_interval}s...")
                 time.sleep(args.poll_interval)
                 continue
+            if args.filename_pattern:
+                raise SystemExit(
+                    f"No payload rows matched --filename-pattern '{args.filename_pattern}' in sender DB."
+                )
             raise SystemExit("No payload rows found in sender DB.")
 
         if not args.allow_partial:
