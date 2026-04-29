@@ -627,7 +627,10 @@ def main() -> None:
         scenario_name = "_".join(scenario_labels) if scenario_labels else "overall"
         safe_scenario = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in scenario_name)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        auto_output_file = os.path.join(report_dir, f"statistical_report_{safe_scenario}_{timestamp}.txt")
+        auto_output_dir = os.path.dirname(os.path.abspath(args.output_file)) if args.output_file else report_dir
+        if auto_output_dir:
+            os.makedirs(auto_output_dir, exist_ok=True)
+        auto_output_file = os.path.join(auto_output_dir, f"statistical_report_{safe_scenario}_{timestamp}.txt")
 
         if args.output_file:
              with open(args.output_file, 'w') as f:
