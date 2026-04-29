@@ -252,6 +252,14 @@ def main() -> None:
     )
     parser.add_argument("--receiver-db", default=config.DB_PATH)
     parser.add_argument(
+        "--report-id",
+        default=None,
+        help=(
+            "Optional report_id filter to isolate one statistical report run "
+            "from checkpoint history."
+        ),
+    )
+    parser.add_argument(
         "--scenario", default=None,
         help="Filter by scenario (e.g. los, nlos). "
              "Omit to process all scenarios.",
@@ -284,7 +292,10 @@ def main() -> None:
     metrics = METRIC_CHOICES if args.metric == "all" else [args.metric]
 
     all_rows = fetch_receiver_checkpoint_history(
-        db_path=args.receiver_db, scenario=args.scenario)
+        db_path=args.receiver_db,
+        scenario=args.scenario,
+        report_id=args.report_id,
+    )
     if not all_rows:
         sys.exit(
             "No checkpoint history found.\n"

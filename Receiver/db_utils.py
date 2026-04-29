@@ -471,7 +471,7 @@ def store_receiver_checkpoint_statistics(db_path, report_id, scenario, rows):
         conn.close()
 
 
-def fetch_receiver_checkpoint_history(db_path=None, scenario=None, metric=None):
+def fetch_receiver_checkpoint_history(db_path=None, scenario=None, metric=None, report_id=None):
     """Fetch accumulated checkpoint statistics averaged across report_ids."""
     conn = get_db_connection(db_path=db_path)
 
@@ -483,6 +483,9 @@ def fetch_receiver_checkpoint_history(db_path=None, scenario=None, metric=None):
     if metric:
         where_clauses.append("metric = ?")
         params.append(metric)
+    if report_id:
+        where_clauses.append("report_id = ?")
+        params.append(report_id)
 
     where_str = " AND ".join(where_clauses)
     rows = conn.execute(

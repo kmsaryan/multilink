@@ -93,14 +93,36 @@ def _receiver_sha256(received_dir: str, filename: str,
 # DB read helpers
 # ──────────────────────────────────────────────────────────────
 
-def _fetch_payload_rows(conn: sqlite3.Connection) -> List[sqlite3.Row]:
+def _fetch_payload_rows(
+    conn: sqlite3.Connection,
+    filename_like: Optional[str] = None,
+    filename_regex: Optional[str] = None,
+) -> List[sqlite3.Row]:
     conn.row_factory = sqlite3.Row
-    return list(conn.execute(
+
+    query = (
         """SELECT payload_id, filename, total_chunks, received_chunks,
                   status, metadata_arrived_time, completion_time
-           FROM   file_map
-           ORDER  BY metadata_arrived_time ASC"""
-    ).fetchall())
+           FROM   file_map"""
+    )
+    params: List[str] = []
+    where: List[str] = []
+
+    if filename_like:
+        where.append("lower(filename) LIKE lower(?)")
+        params.append(filename_like)
+
+    if where:
+        query += "\nWHERE " + " AND ".join(where)
+    query += "\nORDER  BY metadata_arrived_time ASC"
+
+    rows = list(conn.execute(query, params).fetchall())
+
+    if filename_regex:
+        rx = re.compile(filename_regex)
+        rows = [r for r in rows if rx.search(str(r["filename"] or ""))]
+
+    return rows
 
 
 def _fetch_chunk_window(conn: sqlite3.Connection,
@@ -605,6 +627,22 @@ def main() -> None:
                         help="Maximum checkpoint file-count to evaluate.")
     parser.add_argument("--report-id",       default=None,
                         help="Optional suffix for output file names.")
+    parser.add_argument(
+        "--filename-like",
+        default=None,
+        help=(
+            "Optional SQL LIKE filter for filenames in file_map. "
+            "Example: 'Nlos_LinkFail2_%%'."
+        ),
+    )
+    parser.add_argument(
+        "--filename-regex",
+        default=None,
+        help=(
+            "Optional Python regex filter applied after DB query. "
+            "Example: '^Nlos_LinkFail2_\\d+\\.data$'."
+        ),
+    )
     parser.add_argument("--watch",           action="store_true",
                         help="Re-run whenever new completed transfers arrive.")
     parser.add_argument("--poll-interval",   type=float, default=5.0)
@@ -621,7 +659,11 @@ def main() -> None:
 
     if not args.watch:
         conn = get_db_connection(args.receiver_db)
-        rows = _fetch_payload_rows(conn)
+        rows = _fetch_payload_rows(
+            conn,
+            filename_like=args.filename_like,
+            filename_regex=args.filename_regex,
+        )
         conn.close()
         if not rows:
             raise SystemExit("No payload rows in receiver DB (file_map empty).")
@@ -633,7 +675,11 @@ def main() -> None:
     try:
         while True:
             conn = get_db_connection(args.receiver_db)
-            rows = _fetch_payload_rows(conn)
+            rows = _fetch_payload_rows(
+                conn,
+                filename_like=args.filename_like,
+                filename_regex=args.filename_regex,
+            )
             conn.close()
             done = [r for r in rows if _is_complete(r)]
             if not done:
