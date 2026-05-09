@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import argparse
+import fnmatch
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime
@@ -12,6 +14,19 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 import config
+
+
+def numeric_run_key(filename):
+    match = re.search(r"(\d+)", filename or "")
+    if not match:
+        return (10**9, filename or "")
+    return (int(match.group(1)), filename or "")
+
+
+def matches_filename_pattern(filename, pattern):
+    if not pattern:
+        return True
+    return fnmatch.fnmatchcase(filename or "", pattern)
 
 
 def fetch_checkpoint_history_by_scenario(db_path, metric_column="send_span_s", scenario=None):
@@ -57,6 +72,82 @@ def fetch_checkpoint_history_by_scenario(db_path, metric_column="send_span_s", s
                 "n_reports": int(row[5]),
             }
         )
+    return result
+
+
+def fetch_raw_transfer_samples_by_scenario(db_path, scenario=None, filename_pattern=None):
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    query = """
+        SELECT scenario, filename, transfer_time_s
+        FROM run_statistics
+        WHERE transfer_time_s IS NOT NULL
+    """
+    params = []
+    if scenario:
+        query += " AND scenario = ?"
+        params.append(scenario)
+
+    query += " ORDER BY scenario ASC, filename ASC"
+
+    try:
+        cur.execute(query, tuple(params))
+        rows = cur.fetchall()
+    except sqlite3.OperationalError:
+        conn.close()
+        return {}
+
+    conn.close()
+
+    result = {}
+    for row in rows:
+        scenario_name = str(row[0] or "unknown")
+        filename = str(row[1] or "")
+        if not matches_filename_pattern(filename, filename_pattern):
+            continue
+        transfer_time_s = float(row[2]) if row[2] is not None else None
+        result.setdefault(scenario_name, []).append(
+            {
+                "filename": filename,
+                "transfer_time_s": transfer_time_s,
+            }
+        )
+
+    for scenario_name in result:
+        result[scenario_name] = sorted(result[scenario_name], key=lambda item: numeric_run_key(item["filename"]))
+
+    return result
+
+
+def build_checkpoint_rows_from_raw_samples(raw_samples_by_scenario):
+    result = {}
+    for scenario_name, samples in raw_samples_by_scenario.items():
+        running = []
+        scenario_rows = []
+        for idx, sample in enumerate(samples, start=1):
+            transfer = sample.get("transfer_time_s")
+            if transfer is None:
+                continue
+            running.append(float(transfer))
+            mean_value = float(np.mean(running))
+            if len(running) >= 2:
+                variance_value = float(np.var(running, ddof=1))
+                std_value = float(np.std(running, ddof=1))
+            else:
+                variance_value = 0.0
+                std_value = 0.0
+            scenario_rows.append(
+                {
+                    "file_count": idx,
+                    "mean_value": mean_value,
+                    "variance_value": variance_value,
+                    "std_value": std_value,
+                    "n_reports": 1,
+                }
+            )
+        if scenario_rows:
+            result[scenario_name] = scenario_rows
     return result
 
 
@@ -163,17 +254,39 @@ def main():
             "statistical_reports",
         ),
     )
+    parser.add_argument(
+        "--filename-pattern",
+        default=None,
+        help=(
+            "Optional shell-style filename filter (e.g., 'Nlos_LinkFail2_*.data'). "
+            "When provided, variance checkpoints are recomputed from filtered raw samples."
+        ),
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.sender_db):
         sys.exit(f"Sender DB not found: {args.sender_db}")
 
-    scenario_rows = fetch_checkpoint_history_by_scenario(
+    raw_samples_by_scenario = fetch_raw_transfer_samples_by_scenario(
         args.sender_db,
-        metric_column=args.metric,
         scenario=args.scenario,
+        filename_pattern=args.filename_pattern,
     )
+
+    if args.filename_pattern:
+        scenario_rows = build_checkpoint_rows_from_raw_samples(raw_samples_by_scenario)
+    else:
+        scenario_rows = fetch_checkpoint_history_by_scenario(
+            args.sender_db,
+            metric_column=args.metric,
+            scenario=args.scenario,
+        )
+
     if not scenario_rows:
+        if args.filename_pattern:
+            sys.exit(
+                "No raw run_statistics samples matched the requested filename pattern."
+            )
         sys.exit(
             "No checkpoint history found. "
             "Run generate_statistical_report.py at least once first."
@@ -192,20 +305,27 @@ def main():
         emit(f"\nScenario: {scenario_name}")
         emit(f"Variance stability analysis — metric: {args.metric}")
         emit(f"Criterion: |Var(X_k) - Var(X_{{k-1}})| / Var(X_{{k-1}}) < {args.threshold}%")
+        raw_samples = raw_samples_by_scenario.get(scenario_name, [])
+        raw_by_k = {idx: sample for idx, sample in enumerate(raw_samples, start=1)}
         header = (
-            f"{'k':>6}  {'mean (s)':>10}  {'variance (s²)':>14}  "
+            f"{'k':>6}  {'filename@k':<24}  {'sample@k (s)':>12}  {'mean (s)':>10}  {'variance (s²)':>14}  "
             f"{'std (s)':>10}  {'Δvar %':>10}  {'n_reports':>9}"
         )
         emit(header)
         emit("-" * len(header))
 
         for row in stability:
+            file_count = int(row["file_count"])
+            sample_at_k = raw_by_k.get(file_count, {})
+            filename_at_k = str(sample_at_k.get("filename") or "NA")
+            transfer_at_k = sample_at_k.get("transfer_time_s")
+            transfer_at_k_str = f"{transfer_at_k:12.4f}" if transfer_at_k is not None else f"{'NA':>12}"
             delta_str = f"{row['delta_pct']:10.2f}" if row["delta_pct"] is not None else f"{'—':>10}"
             var_str = f"{row['variance']:14.4f}" if row["variance"] is not None else f"{'NA':>14}"
             mean_str = f"{row['mean']:10.4f}" if row["mean"] is not None else f"{'NA':>10}"
             std_str = f"{row['std']:10.4f}" if row["std"] is not None else f"{'NA':>10}"
             emit(
-                f"{row['file_count']:>6}  {mean_str}  {var_str}  "
+                f"{file_count:>6}  {filename_at_k:<24}  {transfer_at_k_str}  {mean_str}  {var_str}  "
                 f"{std_str}  {delta_str}  {row['n_reports']:>9}"
             )
 
@@ -293,7 +413,7 @@ def main():
         ax3.axvline(32, color="gray", linestyle="--", linewidth=1, alpha=0.6)
         ax3.set_xlabel("Sample size k (number of files)")
         ax3.set_ylabel(f"{args.metric} (s)")
-        ax3.set_title("Mean and spread — shown for context only")
+        ax3.set_title("Mean and spread")
         ax3.legend(fontsize=8)
         ax3.grid(True, alpha=0.25)
 
