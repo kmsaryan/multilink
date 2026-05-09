@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import fnmatch
 import math
 import os
 import re
@@ -54,6 +55,12 @@ def numeric_run_key(filename: str) -> Tuple[int, str]:
     if not match:
         return (10**9, filename or "")
     return (int(match.group(1)), filename or "")
+
+
+def matches_filename_pattern(filename: str, pattern: Optional[str]) -> bool:
+    if not pattern:
+        return True
+    return fnmatch.fnmatchcase(filename or "", pattern)
 
 
 def select_checkpoints(n_payloads: int, step: int, max_files: Optional[int]) -> List[int]:
@@ -340,6 +347,14 @@ def main() -> None:
         default=50,
         help="Maximum file-count checkpoint to evaluate (capped by available payloads).",
     )
+    parser.add_argument(
+        "--filename-pattern",
+        default=None,
+        help=(
+            "Optional shell-style filename filter applied to payload filenames "
+            "(e.g., 'Nlos_LinkFail2_*.data')."
+        ),
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.sender_db):
@@ -356,12 +371,20 @@ def main() -> None:
             raise SystemExit("Sender DB missing required tables `payloads` or `chunks`.")
 
         payload_base_rows = fetch_payload_rows(conn)
+        if args.filename_pattern:
+            payload_base_rows = [
+                row for row in payload_base_rows if matches_filename_pattern(str(row["filename"] or ""), args.filename_pattern)
+            ]
         if not payload_base_rows:
             conn.close()
             if args.watch:
                 print(f"[watch] No payload rows yet. Retrying in {args.poll_interval}s...")
                 time.sleep(args.poll_interval)
                 continue
+            if args.filename_pattern:
+                raise SystemExit(
+                    f"No payload rows matched --filename-pattern '{args.filename_pattern}' in sender DB."
+                )
             raise SystemExit("No payload rows found in sender DB.")
 
         if not args.allow_partial:
@@ -486,12 +509,6 @@ def main() -> None:
                 }
             )
 
-        cumulative_rows = build_cumulative_file_rows(
-            per_payload_rows,
-            checkpoint_step=args.checkpoint_step,
-            max_files=args.max_files,
-            scenario_name="overall",
-        )
         scenario_significance_rows = build_scenario_significance_rows(
             per_payload_rows,
             checkpoint_step=args.checkpoint_step,
@@ -499,18 +516,30 @@ def main() -> None:
         )
 
         report_run_id = str(uuid.uuid4())
-        for row in cumulative_rows:
-            store_checkpoint_statistics(
-                args.sender_db,
-                report_run_id=report_run_id,
-                scenario=str(row.get("scenario") or "overall"),
-                metric_column=str(row.get("metric_column") or "unknown"),
-                file_count=int(row.get("file_count") or 0),
-                sample_count=int(row.get("sample_count") or 0),
-                mean_value=float(row["mean"]) if row.get("mean") is not None else None,
-                variance_value=float(row["variance"]) if row.get("variance") is not None else None,
-                std_value=float(row["std"]) if row.get("std") is not None else None,
+        scenario_groups: Dict[str, List[Dict[str, object]]] = {}
+        for row in per_payload_rows:
+            scenario_name = str(row.get("scenario") or "unknown")
+            scenario_groups.setdefault(scenario_name, []).append(row)
+
+        for scenario_name, scenario_rows in sorted(scenario_groups.items(), key=lambda item: item[0]):
+            cumulative_rows = build_cumulative_file_rows(
+                scenario_rows,
+                checkpoint_step=args.checkpoint_step,
+                max_files=args.max_files,
+                scenario_name=scenario_name,
             )
+            for row in cumulative_rows:
+                store_checkpoint_statistics(
+                    args.sender_db,
+                    report_run_id=report_run_id,
+                    scenario=str(row.get("scenario") or scenario_name or "unknown"),
+                    metric_column=str(row.get("metric_column") or "unknown"),
+                    file_count=int(row.get("file_count") or 0),
+                    sample_count=int(row.get("sample_count") or 0),
+                    mean_value=float(row["mean"]) if row.get("mean") is not None else None,
+                    variance_value=float(row["variance"]) if row.get("variance") is not None else None,
+                    std_value=float(row["std"]) if row.get("std") is not None else None,
+                )
 
         iface_health_rows: List[Dict[str, object]] = []
         if table_exists(conn, "interface_stats"):
@@ -598,7 +627,10 @@ def main() -> None:
         scenario_name = "_".join(scenario_labels) if scenario_labels else "overall"
         safe_scenario = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in scenario_name)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        auto_output_file = os.path.join(report_dir, f"statistical_report_{safe_scenario}_{timestamp}.txt")
+        auto_output_dir = os.path.dirname(os.path.abspath(args.output_file)) if args.output_file else report_dir
+        if auto_output_dir:
+            os.makedirs(auto_output_dir, exist_ok=True)
+        auto_output_file = os.path.join(auto_output_dir, f"statistical_report_{safe_scenario}_{timestamp}.txt")
 
         if args.output_file:
              with open(args.output_file, 'w') as f:

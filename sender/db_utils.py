@@ -1,12 +1,17 @@
 import sqlite3, time, os
+import re
 import numpy as np
 
 
 def infer_scenario_from_filename(filename):
     """Infer experiment scenario from a payload filename."""
     name = (filename or "").lower()
-    is_link_failure = "link" in name and "failure" in name
-
+    compact = re.sub(r"[^a-z0-9]+", "", name)
+    is_link_failure = bool(
+        re.search(r"linkfail(?:ure)?\d*", name)
+        or re.search(r"linkfailure\d*", compact)
+        or re.search(r"linkfail\d*", compact)
+    )
     if "nlos" in name and is_link_failure:
         return "nlos_link_failure"
     if "los" in name and is_link_failure:
@@ -20,7 +25,9 @@ def infer_scenario_from_filename(filename):
     return "unknown"
 
 def get_conn(db_path):
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    db_dir = os.path.dirname(db_path)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=30) # Increase timeout to 30s
     # Enable WAL mode for every connection to prevent locking issues
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -35,7 +42,9 @@ def get_conn_with_lock(db_path):
     return conn
 
 def init_sender_db(db_path):
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    db_dir = os.path.dirname(db_path)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
     conn = get_conn(db_path)
     cur = conn.cursor()
     cur.execute("""
