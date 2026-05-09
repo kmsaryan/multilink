@@ -1,6 +1,6 @@
 # Sender
 
-VM1 sender-side pipeline for multi-path UDP file transfer. Monitors link health across multiple interfaces, predicts quality, orchestrates chunk routing, and transmits data to the receiver.
+VM1 sender-side pipeline for the Multilink proof-of-concept. Probes each network interface for RTT, jitter, and packet loss at 2 Hz, scores interfaces using a short-horizon linear regression predictor, assigns payload chunks proportionally to the highest-scoring path, and transmits them over UDP. Acknowledgement state is tracked in a local SQLite database; unacknowledged chunks are rolled back and re-queued at a configurable stale threshold.
 
 ## Directory Contents
 
@@ -51,50 +51,43 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-## Typical Run Order (VM1)
+## Run Order (VM1)
 
-Ensure the receiver side is running before starting.
+Start the receiver before proceeding.
 
 1. Start health checker workers:
-
 ```bash
 cd /usr/local/bin/multilink/sender
 ./run_health.sh
 ```
 
 2. Start predictor daemon:
-
 ```bash
 python3 prediction_monitor.py
 ```
 
 3. Start orchestrator:
-
 ```bash
 python3 orchestrator.py
 ```
 
 4. Start sender workers:
-
 ```bash
 ./run_sender.sh
 ```
 
-5. Start manager (monitors payload folder and ingests files):
-
+5. Start manager:
 ```bash
 python3 manager.py
 ```
 
-6. Drop a test file into the payload folder:
-
+6. Drop a payload into the watched folder:
 ```bash
-dd if=/dev/urandom of=payloads/testfile.bin bs=1M count=1
+dd if=/dev/zero of=payloads/testfile.bin bs=1M count=1
 ```
 
 ## Notes
 
-- Main DB: `sender/sender_coord.db`
+- Coordination database: `sender/sender_coord.db`
 - Key tables: `payloads`, `chunks`, `interface_stats`, `interface_metrics_history`, `interface_predictions`
-- Generated figures are saved under `sender/modeling_reports/`
 - All scripts must be run from within `sender/` or via the absolute path `sender/run_*.sh`
