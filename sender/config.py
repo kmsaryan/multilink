@@ -11,7 +11,7 @@ if IS_RECEIVER:
     RECEIVED_DIR = "/usr/local/bin/multilink/Receiver/received"
     RESULTS_DIR = "/usr/local/bin/multilink/Receiver/results"
 else:
-    DB_PATH = "/usr/local/bin/multilink/sender/sender_coord.db"  # VM1 coordination database
+    DB_PATH = "/usr/local/bin/multilink/sender/sender_coordTest.db"  # VM1 coordination database
     PAYLOAD_DIR = "/usr/local/bin/multilink/sender/payloads"
     RECEIVED_DIR = "/usr/local/bin/multilink/sender/received"
 

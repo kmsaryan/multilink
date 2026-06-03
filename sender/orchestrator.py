@@ -38,19 +38,30 @@ def setup_orchestrator_logger():
 orch_logger = setup_orchestrator_logger()
 
 def handle_retransmissions():
-    """Handle retransmissions for chunks that timed out."""
     conn = get_conn(DB_PATH)
     cur = conn.cursor()
+
+    # Derive timeout from live interface RTT stored by health_checker
+    cur.execute("SELECT MAX(avg_rtt) FROM interface_stats WHERE performance_score > 0")
+    row = cur.fetchone()
+    max_rtt_ms = row[0] if row and row[0] else 500.0  # fallback 500ms if no data yet
+
+    # 10x worst-case RTT, converted ms -> seconds, clamped to [3s, 15s]
+    adaptive_timeout = max(3.0, min(15.0, (max_rtt_ms / 1000.0) * 10))
+
     cur.execute(
         """
         UPDATE chunks 
         SET state='pending', last_sent=NULL 
         WHERE state='sending' AND (last_sent IS NULL OR last_sent < ?)
         """,
-        (time.time() - 30,),
+        (time.time() - adaptive_timeout,),
     )
     if cur.rowcount > 0:
-        orch_logger.warning(f"NETWORK TIMEOUT: Reset {cur.rowcount} timed-out chunks to pending (30s timeout)")
+        orch_logger.warning(
+            f"NETWORK TIMEOUT: Reset {cur.rowcount} timed-out chunks to pending "
+            f"(adaptive timeout={adaptive_timeout:.1f}s from max_rtt={max_rtt_ms:.0f}ms)"
+        )
     conn.commit()
     conn.close()
 
@@ -73,7 +84,7 @@ class Orchestrator:
                 COALESCE(p.blended_score, s.performance_score) as final_score
             FROM interface_stats s
             LEFT JOIN interface_predictions p 
-                ON s.interface_ip = p.interface_ip AND (? - p.timestamp) < 5
+                ON s.interface_ip = p.interface_ip AND (? - p.timestamp) < 15
             WHERE s.performance_score > 0
             ORDER BY final_score DESC
         """
@@ -82,7 +93,7 @@ class Orchestrator:
         conn.close()
         return interfaces
 
-    def pick_next_chunks(self, limit=50):
+    def pick_next_chunks(self, limit=300):
         """Pick the next chunks to send."""
         conn = get_conn(self.db_path)
         cur = conn.cursor()
@@ -110,23 +121,29 @@ class Orchestrator:
         conn = get_conn(self.db_path)
         cur = conn.cursor()
         chunk_idx = 0
-        
+        update_batch = []
+        t_now = time.time()
+
         for iface_ip, weight in interface_weights:
             num_to_assign = max(1, int(weight * len(chunks)))
             if num_to_assign > 0:
                 print(f"   -> Assigning {num_to_assign} chunks to {iface_ip} (Weight: {weight*100:.1f}%)")
-            
+
             for _ in range(num_to_assign):
                 if chunk_idx >= len(chunks):
                     break
                 p_id, c_idx, _ = chunks[chunk_idx]
-                cur.execute(
-                    "UPDATE chunks SET state='sending', assigned_interface=?, last_sent=? WHERE payload_id=? AND idx=?",
-                    (iface_ip, time.time(), p_id, c_idx)
-                )
+                update_batch.append((iface_ip, t_now, p_id, c_idx))
                 chunk_idx += 1
 
+        if update_batch:
+            cur.executemany(
+                "UPDATE chunks SET state='sending', assigned_interface=?, last_sent=? WHERE payload_id=? AND idx=?",
+                update_batch
+            )
+
         conn.commit()
+        
         try:
             cur.execute("DELETE FROM interface_metrics_history WHERE timestamp < ?", (time.time() - 300,))
             conn.commit()
@@ -164,7 +181,7 @@ class Orchestrator:
                     self.assign_chunks_to_interfaces(chunks, interfaces)
                 
                 handle_retransmissions()
-                time.sleep(0.5)
+                time.sleep(0.1 if chunks else 0.5)
             except Exception as e:
                 orch_logger.error(f"Orchestrator loop error: {e}", exc_info=True)
                 time.sleep(1)
@@ -200,22 +217,48 @@ def handle_acks(unix_sock):
     orch_logger.info("ACK Handler thread started.")
     ack_count = 0
     error_count = 0
+    ack_buffer = []          # (payload_id, idx) pairs pending DB write
+    last_flush = time.time()
+    FLUSH_SIZE = 50          # write when buffer reaches this many ACKs
+    FLUSH_INTERVAL = 0.1     # or at least every 100ms
+
     while True:
         try:
-            ack_data, _ = unix_sock.recvfrom(1024)
-            p_id, c_idx = parse_ack(ack_data)
-            if p_id and c_idx is not None:
-                mark_acked(DB_PATH, p_id, c_idx)
-                ack_count += 1
-                if ack_count % 1000 == 0:
-                    orch_logger.info(f"ACK Handler: Processed {ack_count} acknowledgments")
-            else:
-                error_count += 1
-                if error_count % 100 == 0:
-                    orch_logger.debug(f"ACK Handler: {error_count} malformed ACKs received")
+            unix_sock.settimeout(0.05)
+            try:
+                ack_data, _ = unix_sock.recvfrom(1024)
+                p_id, c_idx = parse_ack(ack_data)
+                if p_id and c_idx is not None:
+                    ack_buffer.append((p_id, c_idx))
+                    ack_count += 1
+                else:
+                    error_count += 1
+                    if error_count % 100 == 0:
+                        orch_logger.debug(f"ACK Handler: {error_count} malformed ACKs received")
+            except (BlockingIOError, TimeoutError):
+                pass  # no ACK available right now, fall through to flush check
+
+            now = time.time()
+            if ack_buffer and (len(ack_buffer) >= FLUSH_SIZE or (now - last_flush) >= FLUSH_INTERVAL):
+                try:
+                    conn = get_conn(DB_PATH)
+                    cur = conn.cursor()
+                    cur.executemany(
+                        "UPDATE chunks SET state='acked' WHERE payload_id=? AND idx=?",
+                        ack_buffer
+                    )
+                    conn.commit()
+                    conn.close()
+                    if ack_count % 1000 == 0:
+                        orch_logger.info(f"ACK Handler: Processed {ack_count} acknowledgments")
+                except Exception as db_err:
+                    orch_logger.error(f"ACK batch flush error: {db_err}")
+                ack_buffer.clear()
+                last_flush = now
+
         except Exception as e:
             orch_logger.debug(f"ACK handler exception (non-critical): {type(e).__name__}")
-
+            
 if __name__ == "__main__":
     u_sock = setup_unix_socket()
     orch_logger.info("Unix socket established for ACK communication")

@@ -116,7 +116,7 @@ def run_worker(local_ip):
                 """
                 SELECT payload_id, idx, data FROM chunks
                 WHERE state='sending' AND assigned_interface=?
-                ORDER BY payload_id, idx LIMIT 50
+                ORDER BY payload_id, idx LIMIT 200
                 """, (local_ip,)
             )
             chunks = cur.fetchall()
@@ -133,7 +133,7 @@ def run_worker(local_ip):
                 for p_id, c_idx, c_data in chunks:
                     chunk_key = (p_id, c_idx)
                     
-                    if chunk_key in local_sent_cache and (now - local_sent_cache[chunk_key]) < 25:
+                    if chunk_key in local_sent_cache and (now - local_sent_cache[chunk_key]) < 3:
                         continue
                         
                     local_sent_cache[chunk_key] = now
@@ -152,7 +152,7 @@ def run_worker(local_ip):
                     logger.debug(f"Sent {len(sent_list)} chunks via {local_ip} (total: {send_count})")
                     
                 if len(local_sent_cache) > 5000:
-                    local_sent_cache = {k: v for k, v in local_sent_cache.items() if now - v < 25}
+                    local_sent_cache = {k: v for k, v in local_sent_cache.items() if now - v < 3}
 
         except sqlite3.OperationalError as db_err:
             logger.error(f"Database operational error: {db_err}")

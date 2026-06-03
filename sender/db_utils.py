@@ -146,6 +146,15 @@ def init_sender_db(db_path):
         )
         """
     )
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_chunks_state_iface 
+        ON chunks(state, assigned_interface)
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_chunks_pending
+        ON chunks(state, payload_id, idx) WHERE state='pending'
+    """)
+
     conn.commit()
     conn.close()
 

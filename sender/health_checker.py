@@ -131,20 +131,29 @@ def run_health_worker(interface_ip):
                     rtt_seconds = rtt / 1000.0
                     instant_bitrate = (PROBE_SIZE_BITS * 2) / rtt_seconds if rtt_seconds > 0 else 0.0
 
-                    update_interface_health(DB_PATH, interface_ip, rtt, throughput_bps, current_jitter, current_loss_rate, instant_bitrate)
-                    
                     try:
                         conn = get_conn(DB_PATH)
                         cur = conn.cursor()
+                        t_now = time.time()
+                        perf_score = instant_bitrate / (rtt + 0.001)
+
+                        # Write 1: interface_stats (same logic as update_interface_health)
+                        cur.execute("""
+                            INSERT OR REPLACE INTO interface_stats 
+                            (interface_ip, success_rate, avg_rtt, last_check, performance_score, jitter, loss_rate, instant_bitrate)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (interface_ip, throughput_bps, avg_rtt, t_now, perf_score, current_jitter, current_loss_rate, instant_bitrate))
+
+                        # Write 2: interface_metrics_history
                         cur.execute("""INSERT INTO interface_metrics_history 
                                        (interface_ip, timestamp, uplink_rtt, throughput, jitter, loss_rate, instant_bitrate) 
                                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                                    (interface_ip, time.time(), rtt, throughput_bps, current_jitter, current_loss_rate, instant_bitrate))
+                                    (interface_ip, t_now, avg_rtt, throughput_bps, current_jitter, current_loss_rate, instant_bitrate))
                         conn.commit()
                         conn.close()
                     except Exception as db_err:
                         logger.error(f"Database error: {db_err}")
-                    
+
                     # Log at appropriate level based on RTT
                     if rtt > 500:
                         logger.warning(f"[{interface_ip}] HIGH LATENCY: RTT={rtt:6.2f}ms | Jitter: {current_jitter:5.2f}ms | Loss: {current_loss_rate:4.1f}%")
@@ -156,19 +165,28 @@ def run_health_worker(interface_ip):
                     current_jitter = 0.0 
                     instant_bitrate = 0.0
                     
-                    update_interface_health(DB_PATH, interface_ip, 999.9, throughput_bps, current_jitter, current_loss_rate, instant_bitrate)
-                    
                     try:
                         conn = get_conn(DB_PATH)
                         cur = conn.cursor()
+                        t_now = time.time()
+                        perf_score = 0.0  # rtt is None (timeout); score is zero
+                        rtt_value = 999.9  # sentinel used consistently with original code
+                        # Write 1: interface_stats (same logic as update_interface_health)
+                        cur.execute("""
+                            INSERT OR REPLACE INTO interface_stats 
+                            (interface_ip, success_rate, avg_rtt, last_check, performance_score, jitter, loss_rate, instant_bitrate)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (interface_ip, throughput_bps, rtt_value, t_now, perf_score, current_jitter, current_loss_rate, instant_bitrate))
+
+                        # Write 2: interface_metrics_history
                         cur.execute("""INSERT INTO interface_metrics_history 
                                        (interface_ip, timestamp, uplink_rtt, throughput, jitter, loss_rate, instant_bitrate) 
                                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                                    (interface_ip, time.time(), 999.9, throughput_bps, current_jitter, current_loss_rate, instant_bitrate))
+                                    (interface_ip, t_now, rtt_value, throughput_bps, current_jitter, current_loss_rate, instant_bitrate))
                         conn.commit()
                         conn.close()
                     except Exception as db_err:
-                        logger.error(f"Database error during timeout logging: {db_err}")
+                        logger.error(f"Database error: {db_err}")
 
                     # Log escalation for consecutive timeouts
                     log_level = logging.WARNING if consecutive_timeouts < max_consecutive_timeouts else logging.CRITICAL
