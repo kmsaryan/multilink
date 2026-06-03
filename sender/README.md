@@ -85,7 +85,11 @@ python3 manager.py
 ```bash
 dd if=/dev/zero of=payloads/testfile.bin bs=1M count=1
 ```
-
+or
+```bash
+for i in $(seq -f "%03g" 1 40); do     dd if=/dev/zero of="NoShaper_${i}.data" bs=
+1M count=1 status=none; done
+```
 ## Notes
 
 - Coordination database: `sender/sender_coord.db`
