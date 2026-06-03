@@ -192,26 +192,22 @@ def register_metadata(pid, filename, total_chunks):
     finally:
         conn.close()
 
-def register_arrival(pid, idx, ip, size):
-    """Logs the arrival of a specific data chunk."""
+def register_arrival(pid, idx, ip, size, unique_count):
+    """Logs the arrival of a specific data chunk.
+    
+    unique_count: pre-computed len(stats[pid]) from receiver.py memory cache.
+    Avoids COUNT(DISTINCT) table scan on every packet — O(1) instead of O(n).
+    """
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        # Log the timestamped arrival
         cur.execute("INSERT INTO arrival_logs VALUES (?, ?, ?, ?, ?)", 
                     (pid, idx, time.time(), ip, size))
         
-        # Keep received_chunks as UNIQUE chunk count (retransmissions are logged
-        # in arrival_logs but do not inflate completion progress).
-        cur.execute("""
-            UPDATE file_map 
-            SET received_chunks = (
-                SELECT COUNT(DISTINCT chunk_idx)
-                FROM arrival_logs
-                WHERE payload_id = ?
-            )
-            WHERE payload_id = ?
-        """, (pid, pid))
+        cur.execute(
+            "UPDATE file_map SET received_chunks = ? WHERE payload_id = ?",
+            (unique_count, pid)
+        )
         
         conn.commit()
     except sqlite3.Error as e:

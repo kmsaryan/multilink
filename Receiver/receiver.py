@@ -105,8 +105,7 @@ def run_receiver():
                         percent = (current_received / target * 100) if isinstance(target, int) else 0
                         print(f" [{pid_str[:8]}] Progress: {current_received}/{target} chunks ({percent:.1f}%)")
 
-                    register_arrival(pid_str, chunk_idx, addr[0], len(pkt))
-
+                    register_arrival(pid_str, chunk_idx, addr[0], len(pkt), current_received)
                     if pid_str in expected_chunks:
                         if current_received == expected_chunks[pid_str]:
                             original_name = file_names[pid_str]
