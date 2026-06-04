@@ -25,20 +25,11 @@ from db_utils import (
 
 DEFAULT_OUTPUT_DIR = os.path.join(config.RESULTS_DIR, "statistical_reports")
 
-# ──────────────────────────────────────────────────────────────
-# Metric specs: (column in per_run dict, label stored in DB)
-# The DB label is what find_receiver_significance.py filters on.
-# ──────────────────────────────────────────────────────────────
 METRIC_SPECS: List[Tuple[str, str]] = [
     ("file_to_file_time_s",   "file_to_file"),   # PRIMARY
     ("chunk_to_chunk_time_s", "chunk_to_chunk"),  # SECONDARY
     ("goodput_mbps",          "goodput_mbps"),       # DERIVED
 ]
-
-
-# ──────────────────────────────────────────────────────────────
-# Pure-math helpers
-# ──────────────────────────────────────────────────────────────
 
 def _safe_mean(v: List[float]) -> Optional[float]:
     return statistics.mean(v) if v else None
@@ -57,19 +48,9 @@ def _ci95(v: List[float]) -> Optional[float]:
 def _fmt(value: Optional[float], d: int = 3) -> str:
     return "NA" if value is None else f"{value:.{d}f}"
 
-
-# ──────────────────────────────────────────────────────────────
-# Numeric sort key (mirrors sender side)
-# ──────────────────────────────────────────────────────────────
-
 def _run_key(filename: str) -> Tuple[int, str]:
     m = re.search(r"(\d+)", filename or "")
     return (int(m.group(1)), filename or "") if m else (10 ** 9, filename or "")
-
-
-# ──────────────────────────────────────────────────────────────
-# Integrity helpers
-# ──────────────────────────────────────────────────────────────
 
 def _sha256_file(path: str) -> Optional[str]:
     if not os.path.exists(path):
@@ -88,10 +69,6 @@ def _receiver_sha256(received_dir: str, filename: str,
         return _sha256_file(named)
     return _sha256_file(os.path.join(received_dir, f"{payload_id}.bin"))
 
-
-# ──────────────────────────────────────────────────────────────
-# DB read helpers
-# ──────────────────────────────────────────────────────────────
 
 def _fetch_payload_rows(
     conn: sqlite3.Connection,
@@ -167,11 +144,6 @@ def _completed_signature(rows: List[sqlite3.Row]) -> tuple:
         for r in rows
     ))
 
-
-# ──────────────────────────────────────────────────────────────
-# Checkpoint builder — mirrors sender-side build_cumulative_rows
-# ──────────────────────────────────────────────────────────────
-
 def _select_checkpoints(n: int, step: int,
                          max_files: Optional[int]) -> List[int]:
     step = max(1, step)
@@ -216,11 +188,6 @@ def _build_checkpoint_rows(
             })
     return output
 
-
-# ──────────────────────────────────────────────────────────────
-# Variance stability (same logic as sender's find_significance)
-# ──────────────────────────────────────────────────────────────
-
 def _stability_series(ckpt_rows: List[Dict],
                       metric_label: str) -> List[Dict]:
     """Extract stability series for one metric from checkpoint rows."""
@@ -255,11 +222,6 @@ def _find_stability_point(
         else:
             return int(row["file_count"]), float(d)
     return None, None
-
-
-# ──────────────────────────────────────────────────────────────
-# Significance summary (one row per scenario, mirrors sender)
-# ──────────────────────────────────────────────────────────────
 
 def _build_significance_rows(
     per_run: Sequence[Dict],
@@ -314,11 +276,6 @@ def _build_significance_rows(
         })
     return result
 
-
-# ──────────────────────────────────────────────────────────────
-# CSV writer
-# ──────────────────────────────────────────────────────────────
-
 def _write_csv(path: str, rows: List[Dict],
                fieldnames: List[str]) -> None:
     with open(path, "w", newline="") as fh:
@@ -327,10 +284,6 @@ def _write_csv(path: str, rows: List[Dict],
         w.writeheader()
         w.writerows(rows)
 
-
-# ──────────────────────────────────────────────────────────────
-# Main report
-# ──────────────────────────────────────────────────────────────
 
 def generate_report(args, payload_rows: List[sqlite3.Row],
                     report_id: str) -> None:
@@ -392,8 +345,6 @@ def generate_report(args, payload_rows: List[sqlite3.Row],
             "file_present":         file_pres,
         }
         per_run.append(run_dict)
-
-        # Upsert into run_statistics (same signature as DB function)
         store_run_statistics(
             payload_id=pid,
             report_id=report_id,
@@ -428,13 +379,9 @@ def generate_report(args, payload_rows: List[sqlite3.Row],
             })
 
     conn.close()
-
-    # ── Group by scenario ─────────────────────────────────────
     groups: Dict[str, List[Dict]] = defaultdict(list)
     for r in per_run:
         groups[str(r["scenario"])].append(r)
-
-    # ── Checkpoint rows (written to DB + CSV) ─────────────────
     all_ckpt: List[Dict] = []
     for sc, sc_rows in sorted(groups.items()):
         ckpt = _build_checkpoint_rows(
@@ -450,9 +397,6 @@ def generate_report(args, payload_rows: List[sqlite3.Row],
             scenario=sc,
             rows=ckpt,
         )
-
-    # ── Scenario-level summary ────────────────────────────────
-    # Dict keys MUST match what store_scenario_statistics() reads.
     scenario_summary: List[Dict] = []
     for sc, rows in sorted(groups.items()):
         e2e_v  = [float(r["file_to_file_time_s"])   for r in rows
@@ -496,12 +440,8 @@ def generate_report(args, payload_rows: List[sqlite3.Row],
         })
 
     store_scenario_statistics(report_id, scenario_summary)
-
-    # ── Significance summary (console + CSV) ──────────────────
     significance = _build_significance_rows(
         per_run, args.checkpoint_step, args.max_files)
-
-    # ── Write CSVs ────────────────────────────────────────────
     os.makedirs(args.out_dir, exist_ok=True)
 
     per_run_csv   = os.path.join(args.out_dir,
@@ -554,8 +494,6 @@ def generate_report(args, payload_rows: List[sqlite3.Row],
         "cv_pct", "stable_k", "stability_delta_pct",
         "significance_flag", "significance_note",
     ])
-
-    # ── Console summary ───────────────────────────────────────
     _print_summary(scenario_summary, significance, report_id, args.out_dir)
 
 
@@ -600,11 +538,6 @@ def _print_summary(scenario_rows, sig_rows, report_id, out_dir):
 
     print(f"\nOutput directory: {out_dir}")
     print("=" * W)
-
-
-# ──────────────────────────────────────────────────────────────
-# Entry point
-# ──────────────────────────────────────────────────────────────
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -695,7 +628,5 @@ def main() -> None:
             time.sleep(args.poll_interval)
     except KeyboardInterrupt:
         print("\nStopped.")
-
-
 if __name__ == "__main__":
     main()

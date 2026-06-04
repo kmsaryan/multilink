@@ -155,19 +155,23 @@ def init_receiver_db():
     conn.close()
 
 
-def infer_scenario_from_filename(filename):
-    """Infers a scenario label from the payload filename."""
-    lowered = (filename or "").lower()
-    is_link_failure = "link_failure" in lowered or ("link" in lowered and "failure" in lowered)
+import re
 
-    if "nlos" in lowered and is_link_failure:
-        return "nlos_link_failure"
-    if "los" in lowered and is_link_failure:
-        return "los_link_failure"
-    if "nlos" in lowered:
-        return "nlos"
-    if "los" in lowered:
-        return "los"
+def infer_scenario_from_filename(filename: str) -> str:
+    name = (filename or "").lower()
+    patterns = [
+        (r"nlos.{0,3}link.?fail",   "nlos_linkfail"),   # Nlos_LinkFail2_033
+        (r"los.{0,3}link.?fail",    "los_linkfail"),    # Los_LinkFail*
+        (r"\bnlos\b",               "nlos"),             # pure NLOS
+        (r"\blos\b",                "los"),              # pure LOS
+        (r"no.?shaper",             "no_shaper"),        # no_shaper_*
+        (r"testing",                "other"),            # testing_*,
+    ]
+
+    for pattern, label in patterns:
+        if re.search(pattern, name):
+            return label
+
     return "unknown"
 
 def register_metadata(pid, filename, total_chunks):
