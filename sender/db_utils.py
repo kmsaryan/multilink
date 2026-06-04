@@ -1,27 +1,31 @@
 import sqlite3, time, os
 import re
 import numpy as np
+import re
 
-
-def infer_scenario_from_filename(filename):
-    """Infer experiment scenario from a payload filename."""
+def infer_scenario_from_filename(filename: str) -> str:
+    """
+    Infer scenario from filename.
+    Order: most specific → more generic.
+    """
     name = (filename or "").lower()
-    compact = re.sub(r"[^a-z0-9]+", "", name)
-    is_link_failure = bool(
-        re.search(r"linkfail(?:ure)?\d*", name)
-        or re.search(r"linkfailure\d*", compact)
-        or re.search(r"linkfail\d*", compact)
-    )
-    if "nlos" in name and is_link_failure:
-        return "nlos_link_failure"
-    if "los" in name and is_link_failure:
-        return "los_link_failure"
-    if "nlos" in name:
-        return "nlos"
-    if "los" in name:
-        return "los"
-    if is_link_failure:
-        return "link_failure"
+
+    patterns = [
+        # NLOS link failure (your Nlos_LinkFail* batch)
+        (r"nlos.{0,3}link.?fail",    "NLOS-LF"),
+        # LOS link failure (loslinkfailure*.data)
+        (r"los.{0,3}link.?fail",     "LOS-LF"),
+        # No shaper (NoShaper*.data)
+        (r"noshaper",                "No-Shaper"),
+        # Plain NLOS / LOS batches (Losrun*, Nlosrun*)
+        (r"\bnlos\b|nlosrun",        "NLOS"),
+        (r"\blos\b|losrun",          "LOS"),
+    ]
+
+    for pattern, label in patterns:
+        if re.search(pattern, name):
+            return label
+
     return "unknown"
 
 def get_conn(db_path):
