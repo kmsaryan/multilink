@@ -160,11 +160,14 @@ import re
 def infer_scenario_from_filename(filename: str) -> str:
     name = (filename or "").lower()
     patterns = [
-        (r"nlos.{0,3}link.?fail",   "nlos_linkfail"),   # Nlos_LinkFail2_033
-        (r"los.{0,3}link.?fail",    "los_linkfail"),    # Los_LinkFail*
-        (r"\bnlos\b",               "nlos"),             # pure NLOS
-        (r"\blos\b",                "los"),              # pure LOS
-        (r"no.?shaper",             "no_shaper"),        # no_shaper_*
+        (r"^nlos[_-]?.*link.?fail",    "nlos_linkfail"),   # Nlos_LinkFail2_033
+        (r"^nlos[_-]?.*link.?failure", "nlos_linkfail"),   # Nlos_LinkFailure2_033
+        (r"^los[_-]?.*link.?fail",     "los_linkfail"),    # Los_LinkFail*
+        (r"^los[_-]?.*link.?failure",  "los_linkfail"),    # Los_LinkFailure*
+        (r"^nlos(?:[_-]|\d|$)",       "nlos"),             # Nlos_run2_*
+        (r"^los(?:[_-]|\d|$)",        "los"),              # Los_run2_*
+        (r"^noshaper(?:[_-]|\d|$)|^no.?shaper(?:[_-]|\d|$)",
+                                         "no_shaper"),        # NoShaper_*, no_shaper_*
         (r"testing",                "other"),            # testing_*,
     ]
 
