@@ -4,22 +4,14 @@ import numpy as np
 import re
 
 def infer_scenario_from_filename(filename: str) -> str:
-    """
-    Infer scenario from filename.
-    Order: most specific → more generic.
-    """
     name = (filename or "").lower()
-
     patterns = [
-        # NLOS link failure (your Nlos_LinkFail* batch)
-        (r"nlos.{0,3}link.?fail",    "NLOS-LF"),
-        # LOS link failure (loslinkfailure*.data)
-        (r"los.{0,3}link.?fail",     "LOS-LF"),
-        # No shaper (NoShaper*.data)
-        (r"noshaper",                "No-Shaper"),
-        # Plain NLOS / LOS batches (Losrun*, Nlosrun*)
-        (r"\bnlos\b|nlosrun",        "NLOS"),
-        (r"\blos\b|losrun",          "LOS"),
+        (r"nlos.{0,3}link.?fail",   "nlos_linkfail"),   
+        (r"los.{0,3}link.?fail",    "los_linkfail"),    
+        (r"\bnlos\b",               "nlos"),             
+        (r"\blos\b",                "los"),              
+        (r"no.?shaper",             "no_shaper"),        
+        (r"testing",                "other"),            
     ]
 
     for pattern, label in patterns:

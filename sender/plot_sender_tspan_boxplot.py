@@ -19,19 +19,31 @@ _DEFAULT_REPORT_DIR = os.path.join(_BASE_DIR, "modeling_reports", "statistical_r
 _DEFAULT_DB = getattr(config, "DB_PATH", "sender_state.db")
 _DEFAULT_OUT = getattr(config, "RESULTS_DIR", _DEFAULT_REPORT_DIR)
 
-# ── scenario display order ────────────────────────────────────────────────
 SCENARIO_ORDER = ["No-Shaper", "LOS", "NLOS", "LOS-LF", "NLOS-LF"]
 
 _PALETTE = {
-    "No-Shaper": "#4e9bbf",
-    "LOS":       "#5ab26e",
-    "NLOS":      "#e07b52",
-    "LOS-LF":    "#9b7ec8",
-    "NLOS-LF":   "#d4575a",
+    "No-Shaper": "#1f77b4",
+    "LOS":       "#2ca02c",
+    "NLOS":      "#ff7f0e",
+    "LOS-LF":    "#9467bd",
+    "NLOS-LF":   "#d62728",
 }
 
 
-# ── data loading ──────────────────────────────────────────────────────────
+def canonical_scenario_label(label: str) -> str:
+    normalized = str(label or "unknown").strip().lower().replace("_", "-")
+    aliases = {
+        "no-shaper": "No-Shaper",
+        "noshaper": "No-Shaper",
+        "los": "LOS",
+        "nlos": "NLOS",
+        "los-lf": "LOS-LF",
+        "nlos-lf": "NLOS-LF",
+        "los-link-failure": "LOS-LF",
+        "nlos-link-failure": "NLOS-LF",
+    }
+    return aliases.get(normalized, str(label or "unknown"))
+
 
 def load_data(db_path: str) -> dict[str, list[float]]:
     """Return {scenario: [send_span_s, ...]} from run_statistics."""
@@ -46,10 +58,10 @@ def load_data(db_path: str) -> dict[str, list[float]]:
             for row in conn.execute("PRAGMA table_info(run_statistics)").fetchall()
         }
         if "send_span_s" in cols:
-            value_expr = "send_span_s"
+            value_expr  = "send_span_s"
             where_clause = "send_span_s IS NOT NULL"
         elif {"first_last_sent", "last_last_sent"}.issubset(cols):
-            value_expr = "(last_last_sent - first_last_sent)"
+            value_expr  = "(last_last_sent - first_last_sent)"
             where_clause = "first_last_sent IS NOT NULL AND last_last_sent IS NOT NULL"
         else:
             sys.exit(
@@ -74,11 +86,9 @@ def load_data(db_path: str) -> dict[str, list[float]]:
 
     groups: dict[str, list[float]] = {}
     for scenario, value in rows:
-        groups.setdefault(str(scenario or "unknown"), []).append(float(value))
+        groups.setdefault(canonical_scenario_label(scenario), []).append(float(value))
     return groups
 
-
-# ── plot ──────────────────────────────────────────────────────────────────
 
 def plot(data: dict[str, list[float]], out_path: str) -> None:
     order  = [s for s in SCENARIO_ORDER if s in data]
@@ -89,7 +99,7 @@ def plot(data: dict[str, list[float]], out_path: str) -> None:
 
     fig, ax = plt.subplots(figsize=(max(8, len(order) * 1.8), 6))
 
-    # ── boxes ─────────────────────────────────────────────────────────────
+    # outlier fliers off — extreme points are visible via whisker caps only
     bp = ax.boxplot(
         box_data,
         positions=positions,
@@ -103,22 +113,16 @@ def plot(data: dict[str, list[float]], out_path: str) -> None:
     )
     for patch, label in zip(bp["boxes"], order):
         patch.set_facecolor(_PALETTE.get(label, "#aaaaaa"))
-        patch.set_alpha(0.35)
+        patch.set_alpha(0.5)
+        patch.set_edgecolor(_PALETTE.get(label, "#aaaaaa"))
 
-    # ── jitter strip ──────────────────────────────────────────────────────
-    rng = np.random.default_rng(42)
-    for pos, label in zip(positions, order):
-        vals = np.array(data[label])
-        jx   = pos + rng.uniform(-0.18, 0.18, size=len(vals))
-        ax.scatter(jx, vals,
-                   color=_PALETTE.get(label, "#aaaaaa"),
-                   s=14, alpha=0.65, linewidths=0, zorder=3)
-
-    # ── mean line + diamond ───────────────────────────────────────────────
+    # mean and median: coloured horizontal lines across box width + value labels
     mean_annots = []
+    median_annots = []
     for pos, label in zip(positions, order):
         vals  = np.array(data[label])
         mean  = float(np.mean(vals))
+        median = float(np.median(vals))
         color = _PALETTE.get(label, "#aaaaaa")
 
         ax.plot([pos - 0.225, pos + 0.225], [mean, mean],
@@ -130,14 +134,23 @@ def plot(data: dict[str, list[float]], out_path: str) -> None:
                    linewidths=1.8, zorder=6)
         mean_annots.append((pos, mean, color))
 
-    # annotate after axes are settled
+        ax.plot([pos - 0.225, pos + 0.225], [median, median],
+                color="#222222", linewidth=2.0, zorder=5,
+                solid_capstyle="butt")
+        median_annots.append((pos, median))
+
     for pos, mean, color in mean_annots:
         ax.annotate(f"{mean:.1f}s",
                     xy=(pos, mean), xytext=(5, 6),
                     textcoords="offset points",
                     fontsize=7.5, color=color, fontweight="bold", zorder=7)
 
-    # ── formatting ────────────────────────────────────────────────────────
+    for pos, median in median_annots:
+        ax.annotate(f"{median:.1f}s",
+                    xy=(pos, median), xytext=(5, -14),
+                    textcoords="offset points",
+                    fontsize=7.5, color="#222222", fontweight="bold", zorder=7)
+
     ax.set_xticks(positions)
     ax.set_xticklabels(
         [f"{sc}\n(n={len(data[sc])})" for sc in order],
@@ -151,14 +164,11 @@ def plot(data: dict[str, list[float]], out_path: str) -> None:
 
     legend_elements = [
         mpatches.Patch(facecolor="#cccccc", edgecolor="black", label="IQR (box)"),
-        plt.Line2D([0], [0], color="black", linewidth=2, label="Median"),
+        plt.Line2D([0], [0], color="#222222", linewidth=2, label="Median"),
         plt.Line2D([0], [0], color="#666", linewidth=2,
                    marker="D", markerfacecolor="white",
                    markeredgecolor="#666", markersize=7,
                    label="Mean"),
-        plt.Line2D([0], [0], marker="o", color="w",
-                   markerfacecolor="#888", markersize=6,
-                   label="Individual payload"),
     ]
     ax.legend(handles=legend_elements, fontsize=8.5,
               loc="upper left", framealpha=0.85)
@@ -168,8 +178,6 @@ def plot(data: dict[str, list[float]], out_path: str) -> None:
     plt.close(fig)
     print(f"[OK] Plot saved → {out_path}")
 
-
-# ── CLI ───────────────────────────────────────────────────────────────────
 
 def main() -> None:
     p = argparse.ArgumentParser(
